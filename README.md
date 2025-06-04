@@ -70,13 +70,13 @@
 每次换 BIOS 通道配置并重启后，依次执行：
 
     # 24ch
-    bash 03_run_membw_bench.sh --group B --channels 24 --duration 60
+    bash 03_run_membw_bench.sh --group B --instances cpu number --threads 1 --channels 24 --duration 60
 
     # 换 BIOS 后 → 12ch
-    bash 03_run_membw_bench.sh --group B --channels 12 --duration 60
+    bash 03_run_membw_bench.sh --group B --instances cpu number --threads 1 --channels 12 --duration 60
 
     # 换 BIOS 后 → 8ch
-    bash 03_run_membw_bench.sh --group B --channels 8 --duration 60
+    bash 03_run_membw_bench.sh --group B --instances cpu number --threads 1 --channels 8 --duration 60
 
 结果自动保存到对应目录：
 
