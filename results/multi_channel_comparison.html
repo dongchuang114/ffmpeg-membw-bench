@@ -121,7 +121,7 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <div class="header"><div class="container">
   <div>
     <h1>FFmpeg Memory Bandwidth - Channel Comparison</h1>
-    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 4 configurations tested &bull; 2025-06-05 19:56:07</div>
+    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 4 configurations tested &bull; 2025-06-05 20:21:16</div>
   </div>
   <div><span class="badge orange">Multi-Channel</span></div>
 </div></div>
@@ -138,7 +138,7 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <div class="container">
 <section id="sysinfo-bar" style="background:#161b22;border-bottom:1px solid #30363d;padding:10px 0;margin-bottom:0;">
 <div class="container">
-<div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;margin-bottom:6px;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Hardware</strong><span><strong style="color:#c9d1d9;">CPU</strong>&nbsp;AMD EPYC 9354 32-Core Processor</span>&ensp;<span><strong style="color:#c9d1d9;">Sockets</strong>&nbsp;2</span>&ensp;<span><strong style="color:#c9d1d9;">vCPUs</strong>&nbsp;128</span>&ensp;<span><strong style="color:#c9d1d9;">NUMA</strong>&nbsp;2</span>&ensp;<span><strong style="color:#c9d1d9;">Host</strong>&nbsp;DeepSeek</span></div><div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Software</strong><span><strong style="color:#c9d1d9;">OS</strong>&nbsp;Ubuntu 22.04.5 LTS</span>&ensp;<span><strong style="color:#c9d1d9;">Kernel</strong>&nbsp;6.8.0-86-generic</span>&ensp;<span><strong style="color:#c9d1d9;">FFmpeg</strong>&nbsp;FFmpeg 4.4.2</span>&ensp;<span><strong style="color:#c9d1d9;">Instances</strong>&nbsp;128x1t</span>&ensp;<span><strong style="color:#c9d1d9;">Source</strong>&nbsp;/dev/shm (tmpfs, 4K YUV420)</span></div></div></section>
+<div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;margin-bottom:6px;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Hardware</strong><span><strong style="color:#c9d1d9;">CPU</strong>&nbsp;AMD EPYC 9354 32-Core Processor</span>&ensp;<span><strong style="color:#c9d1d9;">Sockets</strong>&nbsp;2</span>&ensp;<span><strong style="color:#c9d1d9;">vCPUs</strong>&nbsp;128</span>&ensp;<span><strong style="color:#c9d1d9;">NUMA</strong>&nbsp;2</span></div><div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;border-top:1px solid #21262d;padding-top:6px;margin-top:4px;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Software</strong><span><strong style="color:#c9d1d9;">OS</strong>&nbsp;Ubuntu 22.04.5 LTS</span>&ensp;<span><strong style="color:#c9d1d9;">Kernel</strong>&nbsp;6.8.0-86-generic</span>&ensp;<span><strong style="color:#c9d1d9;">FFmpeg</strong>&nbsp;FFmpeg 4.4.2</span>&ensp;<span><strong style="color:#c9d1d9;">Instances</strong>&nbsp;128x1t</span>&ensp;<span><strong style="color:#c9d1d9;">Source</strong>&nbsp;/dev/shm (tmpfs, 4K YUV420)</span></div></div></section>
 
 <section id="summary" class="section">
 <h2>Performance Summary</h2>
@@ -220,7 +220,7 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <table class="scenario-table"><thead><tr><th>Group</th><th>Scenario</th><th>Use Case</th><th>4ch</th><th>8ch</th><th>12ch</th><th>24ch</th><th>Conclusion</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>Cloud Video 4K x265 medium</td><td>Core Reference</td><td class="drop-yellow">16.5%</td><td class="drop-green">2.8%</td><td class="drop-green">2.8%</td><td class="drop-green">0.0%</td><td><span class="recommend-warn">Reduce with Caution</span></td></tr></tbody></table><div class="card" style="margin-top:16px;"><h3>Conclusion</h3><ul style="padding-left:20px;line-height:2;"><li>B: FPS drop 16.5%, reduce with caution</li></ul></div></section>
 
 </div>
-<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-05 19:56:07</div></footer>
+<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-05 20:21:16</div></footer>
 <script>
 
 function show(id, el) {
@@ -275,6 +275,12 @@ function drawBarChart(canvasId, legendId, labels, datasets, yLabel) {
       var bY = PAD.top + PH - bH;
       ctx.fillStyle = COLORS[di % COLORS.length];
       ctx.fillRect(bX, bY, barW - 2, bH);
+      if (val > 0) {
+        ctx.fillStyle = COLORS[di % COLORS.length];
+        ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+        var valStr = val >= 1000 ? val.toFixed(0) : val.toFixed(1);
+        ctx.fillText(valStr, bX + (barW - 2) / 2, bY - 3);
+      }
     }
     ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(labels[gi2], PAD.left + gi2 * groupW + groupW / 2, H - PAD.bottom + 16);
@@ -355,6 +361,15 @@ function drawLineChart(canvasId, legendId, labels, datasets, yLabel) {
     ds.data.forEach(function(v, i) {
       ctx.beginPath(); ctx.arc(xPos(i), yPos(v), 4, 0, 2*Math.PI); ctx.fill();
     });
+    if (!ds.dashed) {
+      ctx.fillStyle = color; ctx.font = 'bold 10px sans-serif';
+      ds.data.forEach(function(v, i) {
+        var x = xPos(i), y = yPos(v);
+        var valStr = v >= 1000 ? v.toFixed(0) : v.toFixed(1);
+        ctx.textAlign = (i===0)?'left':(i===ds.data.length-1?'right':'center');
+        ctx.fillText(valStr, x, y - 8);
+      });
+    }
   });
 
   ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;

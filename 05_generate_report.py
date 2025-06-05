@@ -291,6 +291,12 @@ function drawBarChart(canvasId, legendId, labels, datasets, yLabel) {
       var bY = PAD.top + PH - bH;
       ctx.fillStyle = COLORS[di % COLORS.length];
       ctx.fillRect(bX, bY, barW - 2, bH);
+      if (val > 0) {
+        ctx.fillStyle = COLORS[di % COLORS.length];
+        ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center';
+        var valStr = val >= 1000 ? val.toFixed(0) : val.toFixed(1);
+        ctx.fillText(valStr, bX + (barW - 2) / 2, bY - 3);
+      }
     }
     ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
     ctx.fillText(labels[gi2], PAD.left + gi2 * groupW + groupW / 2, H - PAD.bottom + 16);
@@ -371,6 +377,15 @@ function drawLineChart(canvasId, legendId, labels, datasets, yLabel) {
     ds.data.forEach(function(v, i) {
       ctx.beginPath(); ctx.arc(xPos(i), yPos(v), 4, 0, 2*Math.PI); ctx.fill();
     });
+    if (!ds.dashed) {
+      ctx.fillStyle = color; ctx.font = 'bold 10px sans-serif';
+      ds.data.forEach(function(v, i) {
+        var x = xPos(i), y = yPos(v);
+        var valStr = v >= 1000 ? v.toFixed(0) : v.toFixed(1);
+        ctx.textAlign = (i===0)?'left':(i===ds.data.length-1?'right':'center');
+        ctx.fillText(valStr, x, y - 8);
+      });
+    }
   });
 
   ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
@@ -988,9 +1003,8 @@ def build_multi_report(all_results, stream_peak=None):
         '<span><strong style="color:#c9d1d9;">CPU</strong>&nbsp;' + _cpu + '</span>&ensp;'
         '<span><strong style="color:#c9d1d9;">Sockets</strong>&nbsp;' + _sockets + '</span>&ensp;'
         '<span><strong style="color:#c9d1d9;">vCPUs</strong>&nbsp;' + _vcpus + '</span>&ensp;'
-        '<span><strong style="color:#c9d1d9;">NUMA</strong>&nbsp;' + _numa + '</span>&ensp;'
-        '<span><strong style="color:#c9d1d9;">Host</strong>&nbsp;' + _hostname + '</span></div>'
-        '<div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Software</strong>'
+        '<span><strong style="color:#c9d1d9;">NUMA</strong>&nbsp;' + _numa + '</span></div>'
+        '<div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;border-top:1px solid #21262d;padding-top:6px;margin-top:4px;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Software</strong>'
         '<span><strong style="color:#c9d1d9;">OS</strong>&nbsp;' + _os_ver + '</span>&ensp;'
         '<span><strong style="color:#c9d1d9;">Kernel</strong>&nbsp;' + _kernel + '</span>&ensp;'
         '<span><strong style="color:#c9d1d9;">FFmpeg</strong>&nbsp;' + _ffmpeg_ver + '</span>&ensp;'
