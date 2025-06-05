@@ -228,11 +228,30 @@ build_fps_args() {
         if [ "$mode" = "decode" ]; then
             echo "-r ${target} -re"
         else
-            # 编码：输入仍以 src_fps 摄入，vf 丢帧控制输出速率，-re 实时限速
-            echo "-r ${src_fps} -re -vf fps=${target}"
+            # 编码：全速读取（输入侧只设帧率，输出侧 -vf fps 由 build_vf_args 单独控制）
+            echo "-r ${src_fps}"
         fi
     else
         echo "-r ${src_fps}"
+    fi
+}
+
+# 构建 ffmpeg 输出端 fps 过滤器（必须放在 -i 之后）
+# 仅 encode 模式、target>0 时生效
+build_vf_args() {
+    local target="${1:-0}" mode="${2:-encode}"
+    if [ "${target}" -gt 0 ] 2>/dev/null && [ "$mode" = "encode" ]; then
+        echo "-vf fps=${target}"
+    fi
+}
+
+
+# 构建 ffmpeg 输出端 fps 过滤器（必须放在 -i 之后）
+# 仅 encode 模式 target>0 时生效；decode 模式 -re 已限速
+build_vf_args() {
+    local target="${1:-0}" mode="${2:-encode}"
+    if [ "${target}" -gt 0 ] 2>/dev/null && [ "$mode" = "encode" ]; then
+        echo "-vf fps=${target}"
     fi
 }
 
@@ -275,11 +294,13 @@ if should_run A && ! should_skip A; then
 
     log "[A] Starting single-instance x265 medium test (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     START_A=$(date +%s)
     numactl --cpunodebind=0 --membind=0 \
         ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
             ${FPS_ARGS} \
             -stream_loop -1 -i "$INPUT" \
+            ${VF_ARGS} \
             -t "$DURATION" \
             -c:v libx265 -preset medium \
             -x265-params "ref=5:bframes=3:pools=none" \
@@ -353,6 +374,7 @@ if should_run B && ! should_skip B; then
 
     log "[B] Launching ${INSTANCES} ffmpeg instances (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     PIDS=()
     for i in $(seq 0 $((INSTANCES - 1))); do
         NODE=$(assign_numa_node "$i")
@@ -360,6 +382,7 @@ if should_run B && ! should_skip B; then
             ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                 ${FPS_ARGS} \
                 -stream_loop -1 -i "$INPUT" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -c:v libx265 -preset medium \
                 -x265-params "ref=5:bframes=3:pools=none" \
@@ -451,6 +474,7 @@ if should_run C && ! should_skip C; then
 
     log "[C] Launching ${INSTANCES} ffmpeg instances x265 slow (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     PIDS=()
     for i in $(seq 0 $((INSTANCES - 1))); do
         NODE=$(assign_numa_node "$i")
@@ -458,6 +482,7 @@ if should_run C && ! should_skip C; then
             ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                 ${FPS_ARGS} \
                 -stream_loop -1 -i "$INPUT" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -c:v libx265 -preset slow \
                 -x265-params "ref=5:bframes=3:pools=none" \
@@ -539,6 +564,7 @@ if should_run D && ! should_skip D; then
 
     log "[D] Launching ${INSTANCES} ffmpeg instances x264 (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     PIDS=()
     for i in $(seq 0 $((INSTANCES - 1))); do
         NODE=$(assign_numa_node "$i")
@@ -546,6 +572,7 @@ if should_run D && ! should_skip D; then
             ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                 ${FPS_ARGS} \
                 -stream_loop -1 -i "$INPUT" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -c:v libx264 -preset medium \
                 -threads ${THREADS} \
@@ -643,6 +670,7 @@ if should_run E && ! should_skip E; then
         NODE=$(assign_numa_node "$i")
         numactl --cpunodebind=${NODE} --membind=${NODE} \
             ffmpeg ${FPS_ARGS} -stream_loop -1 -i "$REF_FILE" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -f null - \
                 >> "${EDIR}/instance_${i}.log" 2>&1 &
@@ -725,6 +753,7 @@ if should_run F && ! should_skip F; then
 
     log "[F] Launching ${INSTANCES} ffmpeg instances 1080p ultrafast (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     PIDS=()
     for i in $(seq 0 $((INSTANCES - 1))); do
         NODE=$(assign_numa_node "$i")
@@ -732,6 +761,7 @@ if should_run F && ! should_skip F; then
             ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                 ${FPS_ARGS} \
                 -stream_loop -1 -i "$INPUT" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -vf scale=1920:1080 \
                 -c:v libx265 -preset ultrafast \
@@ -818,6 +848,7 @@ if should_run G && ! should_skip G; then
 
     log "[G] Launching ${INSTANCES} ffmpeg instances x265 slow ref=8 (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     PIDS=()
     for i in $(seq 0 $((INSTANCES - 1))); do
         NODE=$(assign_numa_node "$i")
@@ -825,6 +856,7 @@ if should_run G && ! should_skip G; then
             ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                 ${FPS_ARGS} \
                 -stream_loop -1 -i "$INPUT" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -c:v libx265 -preset slow \
                 -x265-params "ref=8:bframes=4:pools=none:allow-non-conformance=1" \
@@ -930,6 +962,7 @@ if should_run H && ! should_skip H; then
 
     log "[H] Launching ${INSTANCES} ffmpeg instances x265 ultrafast (${DURATION}s)..."
     FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
     PIDS=()
     for i in $(seq 0 $((INSTANCES - 1))); do
         NODE=$(assign_numa_node "$i")
@@ -937,6 +970,7 @@ if should_run H && ! should_skip H; then
             ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                 ${FPS_ARGS} \
                 -stream_loop -1 -i "$INPUT" \
+                ${VF_ARGS} \
                 -t "$DURATION" \
                 -c:v libx265 -preset ultrafast \
                 -x265-params "ref=1:bframes=0:pools=none" \
@@ -1066,6 +1100,7 @@ if should_run I && ! should_skip I; then
         log "[I] SVT encoder mode: ${SVT_MODE}"
         log "[I] Launching ${INSTANCES} instances (${DURATION}s, preset=${SVT_PRESET})..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
         PIDS=()
         for i in $(seq 0 $((INSTANCES - 1))); do
             NODE=$(assign_numa_node "$i")
@@ -1074,6 +1109,7 @@ if should_run I && ! should_skip I; then
                     ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} \
                         -stream_loop -1 -i "${INPUT}" \
+                        ${VF_ARGS} \
                         -t "${DURATION}" \
                         -c:v libsvtav1 -preset ${SVT_PRESET} \
                         -svtav1-params "lp=1" \
@@ -1084,6 +1120,7 @@ if should_run I && ! should_skip I; then
                 numactl --cpunodebind=${NODE} --membind=${NODE} \
                     bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        ${VF_ARGS} \
                         -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
                     SvtAv1EncApp -i stdin -w 3840 -h 2160 \
                         --fps-num 30 --fps-denom 1 \
@@ -1201,6 +1238,7 @@ if should_run J && ! should_skip J; then
         log "[J] SVT encoder mode: ${SVT_MODE_J}"
         log "[J] Launching ${INST_J} instances (${DURATION}s, preset=${SVT_PRESET_J})..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
         PIDS=()
         for i in $(seq 0 $((INST_J - 1))); do
             NODE=$(assign_numa_node "$i")
@@ -1209,6 +1247,7 @@ if should_run J && ! should_skip J; then
                     ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} \
                         -stream_loop -1 -i "${INPUT}" \
+                        ${VF_ARGS} \
                         -t "${DURATION}" \
                         -c:v libsvtav1 -preset ${SVT_PRESET_J} \
                         -svtav1-params "lp=1" \
@@ -1218,6 +1257,7 @@ if should_run J && ! should_skip J; then
                 numactl --cpunodebind=${NODE} --membind=${NODE} \
                     bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        ${VF_ARGS} \
                         -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
                     SvtAv1EncApp -i stdin -w 3840 -h 2160 \
                         --fps-num 30 --fps-denom 1 \
@@ -1332,6 +1372,7 @@ if should_run K && ! should_skip K; then
         log "[K] SVT encoder mode: ${SVT_MODE_K}"
         log "[K] Launching ${INST_K} instances (${DURATION}s, preset=${SVT_PRESET_K})..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
         PIDS=()
         for i in $(seq 0 $((INST_K - 1))); do
             NODE=$(assign_numa_node "$i")
@@ -1340,6 +1381,7 @@ if should_run K && ! should_skip K; then
                     ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} \
                         -stream_loop -1 -i "${INPUT}" \
+                        ${VF_ARGS} \
                         -t "${DURATION}" \
                         -c:v libsvtav1 -preset ${SVT_PRESET_K} \
                         -svtav1-params "lp=1" \
@@ -1349,6 +1391,7 @@ if should_run K && ! should_skip K; then
                 numactl --cpunodebind=${NODE} --membind=${NODE} \
                     bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        ${VF_ARGS} \
                         -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
                     SvtAv1EncApp -i stdin -w 3840 -h 2160 \
                         --fps-num 30 --fps-denom 1 \
@@ -1474,6 +1517,7 @@ if should_run L && ! should_skip L; then
         log "[L] SVT encoder mode: ${SVT_MODE_L}"
         log "[L] Launching ${INST_L} instances (${DURATION}s, preset=${SVT_PRESET_L})..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
         PIDS=()
         for i in $(seq 0 $((INST_L - 1))); do
             NODE=$(assign_numa_node "$i")
@@ -1482,6 +1526,7 @@ if should_run L && ! should_skip L; then
                     ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} \
                         -stream_loop -1 -i "${INPUT}" \
+                        ${VF_ARGS} \
                         -t "${DURATION}" \
                         -c:v libsvtav1 -preset ${SVT_PRESET_L} \
                         -svtav1-params "lp=1" \
@@ -1491,6 +1536,7 @@ if should_run L && ! should_skip L; then
                 numactl --cpunodebind=${NODE} --membind=${NODE} \
                     bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                         ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        ${VF_ARGS} \
                         -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
                     SvtAv1EncApp -i stdin -w 3840 -h 2160 \
                         --fps-num 30 --fps-denom 1 \
@@ -1595,6 +1641,7 @@ if should_run M && ! should_skip M; then
 
         log "[M] Launching ${INSTANCES} ffmpeg instances x265 fast (${DURATION}s)..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
         PIDS=()
         for i in $(seq 0 $((INSTANCES - 1))); do
             NODE=$(assign_numa_node "$i")
@@ -1602,6 +1649,7 @@ if should_run M && ! should_skip M; then
                 ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
                     ${FPS_ARGS} \
                     -stream_loop -1 -i "$INPUT" \
+                    ${VF_ARGS} \
                     -t "$DURATION" \
                     -c:v libx265 -preset fast \
                     -x265-params "pools=none" \
@@ -1712,6 +1760,7 @@ if should_run N && ! should_skip N; then
 
         log "[N] Launching ${INSTANCES} ffmpeg instances 1080p x265 medium (${DURATION}s)..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
         PIDS=()
         for i in $(seq 0 $((INSTANCES - 1))); do
             NODE=$(assign_numa_node "$i")
@@ -1719,6 +1768,7 @@ if should_run N && ! should_skip N; then
                 ffmpeg -f rawvideo -video_size 1920x1080 -pix_fmt yuv420p \
                     ${FPS_ARGS} \
                     -stream_loop -1 -i "$INPUT_1080P" \
+                    ${VF_ARGS} \
                     -t "$DURATION" \
                     -c:v libx265 -preset medium \
                     -x265-params "pools=none" \
@@ -1841,6 +1891,7 @@ if should_run O && ! should_skip O; then
             log "[O] SVT encoder mode: ${SVT_MODE_O}"
             log "[O] Launching ${INSTANCES} instances 1080p (${DURATION}s, preset=${SVT_PRESET_O})..."
             FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+            VF_ARGS=$(build_vf_args "$TARGET_FPS" "encode")
             PIDS=()
             for i in $(seq 0 $((INSTANCES - 1))); do
                 NODE=$(assign_numa_node "$i")
@@ -1849,6 +1900,7 @@ if should_run O && ! should_skip O; then
                         ffmpeg -f rawvideo -video_size 1920x1080 -pix_fmt yuv420p \
                             ${FPS_ARGS} \
                             -stream_loop -1 -i "${INPUT_1080P}" \
+                            ${VF_ARGS} \
                             -t "${DURATION}" \
                             -c:v libsvtav1 -preset ${SVT_PRESET_O} \
                             -svtav1-params "lp=1" \
@@ -1858,6 +1910,7 @@ if should_run O && ! should_skip O; then
                     numactl --cpunodebind=${NODE} --membind=${NODE} \
                         bash -c "ffmpeg -f rawvideo -video_size 1920x1080 -pix_fmt yuv420p \
                             ${FPS_ARGS} -stream_loop -1 -i \"${INPUT_1080P}\" \
+                            ${VF_ARGS} \
                             -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
                         SvtAv1EncApp -i stdin -w 1920 -h 1080 \
                             --fps-num 30 --fps-denom 1 \

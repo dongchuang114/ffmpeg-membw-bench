@@ -176,6 +176,7 @@ def discover_results(results_dir):
                 'instances': instances,
                 'threads': threads,
                 'preset': preset,
+                'target_fps': int(data.get('target_fps', 0)),
                 'avg_fps_per_instance': float(data.get('avg_fps_per_instance', 0)),
                 'total_fps': float(data.get('total_fps', 0)),
                 'avg_cpu_pct': float(data.get('avg_cpu_pct', 0)),
@@ -186,9 +187,15 @@ def discover_results(results_dir):
                 'raw': data,
             })
 
-    # Sort: medium first at same instances, then ultrafast; overall by instances asc
+    # Sort: medium first at same instances, then ultrafast, then fixed-fps; overall by instances asc
     def sort_key(r):
-        preset_order = 0 if r['preset'] == 'medium' else 1
+        # fixed-fps rows get preset_order=2 (after medium=0, ultrafast=1)
+        if r['target_fps'] > 0:
+            preset_order = 2
+        elif r['preset'] == 'medium':
+            preset_order = 0
+        else:
+            preset_order = 1
         return (r['instances'], preset_order)
 
     rows.sort(key=sort_key)
@@ -205,6 +212,16 @@ def infer_platform(rows):
             s = raw['system']
             if isinstance(s, dict):
                 return s.get('cpu_model', '')
+    # Infer total vCPU from max instances x threads across all rows
+    try:
+        total_vcpu = max(
+            r.get('raw', {}).get('instances', 0) * r.get('raw', {}).get('threads_per_instance', 1)
+            for r in rows
+        )
+        if total_vcpu > 0:
+            return f'AMD EPYC 9755 2P ({total_vcpu} Cores)'
+    except Exception:
+        pass
     return 'AMD EPYC 9755 2P (256 Cores)'
 
 
@@ -213,8 +230,9 @@ def infer_platform(rows):
 # ──────────────────────────────────────────────
 
 def compute_kpis(rows):
-    medium_rows = [r for r in rows if r['preset'] == 'medium']
-    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast']
+    medium_rows = [r for r in rows if r['preset'] == 'medium' and r['target_fps'] == 0]
+    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast' and r['target_fps'] == 0]
+    fixed_fps_rows = [r for r in rows if r['target_fps'] > 0]
 
     kpi = {}
     if medium_rows:
@@ -249,6 +267,13 @@ def compute_kpis(rows):
     else:
         kpi['ultrafast_vs_medium_x'] = 0
 
+    # Fixed-fps KPIs
+    kpi['fixed_fps_rows'] = fixed_fps_rows
+    if fixed_fps_rows:
+        kpi['has_fixed_fps'] = True
+    else:
+        kpi['has_fixed_fps'] = False
+
     return kpi
 
 
@@ -257,8 +282,9 @@ def compute_kpis(rows):
 # ──────────────────────────────────────────────
 
 def build_analysis_text(rows, kpis):
-    medium_rows = [r for r in rows if r['preset'] == 'medium']
-    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast']
+    medium_rows = [r for r in rows if r['preset'] == 'medium' and r['target_fps'] == 0]
+    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast' and r['target_fps'] == 0]
+    fixed_fps_rows = kpis.get('fixed_fps_rows', [])
 
     # Block 1: FPS gain source
     if len(medium_rows) >= 2:
@@ -309,7 +335,31 @@ def build_analysis_text(rows, kpis):
     else:
         block3 = "无 ultrafast 数据，无法比较。"
 
-    return block1, block2, block3
+    # Block 4: fixed-fps SLA analysis
+    if fixed_fps_rows:
+        lines = []
+        for r in fixed_fps_rows:
+            fps_target = r['target_fps']
+            instances = r['instances']
+            threads = r['threads']
+            cpu = r['avg_cpu_pct']
+            bw = r['membw_read_gbs']
+            iowait = r['iowait_pct']
+            actual_fps = r['avg_fps_per_instance']
+            lines.append(
+                f"  固定 {fps_target} fps/实例，{instances}x{threads}t："
+                f"  实际 {actual_fps:.2f} fps/实例，"
+                f"CPU {cpu:.1f}%，iowait {iowait:.1f}%，MemBW {bw:.2f} GB/s"
+            )
+        block4 = (
+            "固定 FPS/实例（SLA 建模）场景下，CPU 和内存带宽消耗如下：\n"
+            + '\n'.join(lines) + '\n'
+            + '  可与满速跑结果对比，推算固定 SLA 下的资源余量和可减配空间。'
+        )
+    else:
+        block4 = None
+
+    return block1, block2, block3, block4
 
 
 # ──────────────────────────────────────────────
@@ -317,8 +367,8 @@ def build_analysis_text(rows, kpis):
 # ──────────────────────────────────────────────
 
 def build_advice_table(rows, kpis):
-    medium_rows = [r for r in rows if r['preset'] == 'medium']
-    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast']
+    medium_rows = [r for r in rows if r['preset'] == 'medium' and r['target_fps'] == 0]
+    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast' and r['target_fps'] == 0]
 
     best_medium = max(medium_rows, key=lambda r: r['total_fps']) if medium_rows else None
     best_uf = max(ultrafast_rows, key=lambda r: r['total_fps']) if ultrafast_rows else None
@@ -376,18 +426,32 @@ def build_advice_table(rows, kpis):
 
 def generate_html(rows, title, platform, results_dir, output_path):
     kpis = compute_kpis(rows)
-    block1, block2, block3 = build_analysis_text(rows, kpis)
+    block1, block2, block3, block4 = build_analysis_text(rows, kpis)
     advice_rows_html = build_advice_table(rows, kpis)
     now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    # For charts: labels and values
-    medium_rows = [r for r in rows if r['preset'] == 'medium']
-    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast']
+    has_fixed_fps = kpis.get('has_fixed_fps', False)
+    fixed_fps_rows = kpis.get('fixed_fps_rows', [])
+
+    # Auto-adjust title: distinguish max-throughput vs fixed-fps tests
+    if has_fixed_fps and not any(r['target_fps'] == 0 for r in rows):
+        # Only fixed-fps data present
+        report_subtitle = '固定FPS（SLA建模）测试报告'
+    elif has_fixed_fps:
+        # Mixed: both max-throughput and fixed-fps
+        report_subtitle = '最大吞吐 + 固定FPS（SLA建模）对比报告'
+    else:
+        report_subtitle = '最大吞吐测试报告'
+
+    # For charts: labels and values (exclude fixed-fps rows from main charts)
+    medium_rows = [r for r in rows if r['preset'] == 'medium' and r['target_fps'] == 0]
+    ultrafast_rows = [r for r in rows if r['preset'] == 'ultrafast' and r['target_fps'] == 0]
     all_rows_ordered = medium_rows + ultrafast_rows
 
     def make_label(r):
         preset_short = 'm' if r['preset'] == 'medium' else 'uf'
-        return f"{r['instances']}x{r['threads']}t-{preset_short}"
+        fps_suffix = f'@{r["target_fps"]}fps' if r['target_fps'] > 0 else ''
+        return f"{r['instances']}x{r['threads']}t-{preset_short}{fps_suffix}"
 
     chart_labels = [make_label(r) for r in all_rows_ordered]
     chart_total_fps = [r['total_fps'] for r in all_rows_ordered]
@@ -401,30 +465,38 @@ def generate_html(rows, title, platform, results_dir, output_path):
     svg4 = make_line_chart_svg('MemBW 读带宽 (GB/s)', chart_labels, chart_bw, '#3fb950')
 
     # Data table rows
-    base_total_fps = rows[0]['total_fps'] if rows else 1
+    # Base row: first non-fixed-fps row (or first row if all fixed-fps)
+    base_rows = [r for r in rows if r['target_fps'] == 0]
+    base_total_fps = base_rows[0]['total_fps'] if base_rows else (rows[0]['total_fps'] if rows else 1)
     table_rows_html = []
     best_medium_fps = max((r['total_fps'] for r in medium_rows), default=0)
 
     for r in rows:
-        is_base = (r == rows[0])
-        is_best_medium = (r['preset'] == 'medium' and r['total_fps'] == best_medium_fps)
-        is_ultrafast = (r['preset'] == 'ultrafast')
+        is_fixed_fps = (r['target_fps'] > 0)
+        is_base = (not is_fixed_fps and base_rows and r == base_rows[0])
+        is_best_medium = (r['preset'] == 'medium' and r['target_fps'] == 0 and r['total_fps'] == best_medium_fps)
+        is_ultrafast = (r['preset'] == 'ultrafast' and r['target_fps'] == 0)
 
         gain = (r['total_fps'] - base_total_fps) / base_total_fps * 100 if base_total_fps > 0 else 0
         gain_str = f'+{gain:.1f}%' if gain >= 0 else f'{gain:.1f}%'
 
-        cfg_label = f"{r['instances']}x{r['threads']}t {r['preset']}"
+        fps_suffix = f'@{r["target_fps"]}fps' if is_fixed_fps else ''
+        cfg_label = f"{r['instances']}x{r['threads']}t{fps_suffix} {r['preset']}"
         badge = ''
         if is_base:
             badge = ' <span class="badge badge-base">基准</span>'
         if is_best_medium:
             badge += ' <span class="badge badge-best">最优</span>'
+        if is_fixed_fps:
+            badge += ' <span class="badge badge-fixedfps">固定FPS</span>'
 
         row_class = ''
         if is_best_medium:
             row_class = ' class="row-best"'
         elif is_ultrafast:
             row_class = ' class="row-ultrafast"'
+        elif is_fixed_fps:
+            row_class = ' class="row-fixedfps"'
 
         table_rows_html.append(
             f'<tr{row_class}>'
@@ -458,6 +530,17 @@ def generate_html(rows, title, platform, results_dir, output_path):
 
     # block2 needs <br> for HTML
     block2_html = block2.replace('\n', '<br>')
+
+    # block4: fixed-fps analysis (conditional)
+    if block4 is not None:
+        block4_html = (
+            '<div class="analysis-block ab-purple">'
+            '<div class="ab-title">固定 FPS/实例（SLA 建模）资源消耗</div>'
+            + block4.replace('\n', '<br>')
+            + '</div>'
+        )
+    else:
+        block4_html = ''
 
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
@@ -504,6 +587,7 @@ td:first-child {{ text-align: left; }}
 tr:last-child td {{ border-bottom: none; }}
 tr.row-best {{ background: rgba(0, 176, 240, 0.07); }}
 tr.row-ultrafast {{ border-left: 3px solid #f16521; }}
+tr.row-fixedfps {{ border-left: 3px solid #7c4dff; background: rgba(124,77,255,0.05); }}
 tr:hover {{ background: #1c2128; }}
 .gain-cell {{ color: #3fb950; font-weight: 600; }}
 .badge {{
@@ -512,6 +596,7 @@ tr:hover {{ background: #1c2128; }}
 }}
 .badge-base {{ background: #21262d; color: #8b949e; border: 1px solid #30363d; }}
 .badge-best {{ background: rgba(0,176,240,0.15); color: #00b0f0; border: 1px solid #00b0f0; }}
+.badge-fixedfps {{ background: rgba(139,71,255,0.15); color: #b388ff; border: 1px solid #7c4dff; }}
 .charts-grid {{
     display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 28px;
 }}
@@ -529,12 +614,14 @@ tr:hover {{ background: #1c2128; }}
 .ab-blue {{ background: rgba(0,176,240,0.08); border-left: 3px solid #00b0f0; }}
 .ab-orange {{ background: rgba(241,101,33,0.08); border-left: 3px solid #f16521; }}
 .ab-green {{ background: rgba(63,185,80,0.08); border-left: 3px solid #3fb950; }}
+.ab-purple {{ background: rgba(124,77,255,0.08); border-left: 3px solid #7c4dff; }}
 .ab-title {{
     font-weight: 700; font-size: 14px; margin-bottom: 8px;
 }}
 .ab-blue .ab-title {{ color: #00b0f0; }}
 .ab-orange .ab-title {{ color: #f16521; }}
 .ab-green .ab-title {{ color: #3fb950; }}
+.ab-purple .ab-title {{ color: #b388ff; }}
 .advice-table th {{ background: #21262d; }}
 .advice-table td.cfg {{ color: #00b0f0; font-family: monospace; font-size: 12px; }}
 .advice-table td.fps {{ color: #3fb950; font-weight: 600; }}
@@ -548,7 +635,7 @@ footer {{
 
 <h1>{title}</h1>
 <div class="subtitle">
-    平台：{platform} &nbsp;|&nbsp; 测试时长：{duration_str} &nbsp;|&nbsp; 生成时间：{now_str}
+    {report_subtitle} &nbsp;|&nbsp; 平台：{platform} &nbsp;|&nbsp; 测试时长：{duration_str} &nbsp;|&nbsp; 生成时间：{now_str}
 </div>
 
 <!-- KPI Cards -->
@@ -614,6 +701,7 @@ footer {{
         <div class="ab-title">ultrafast vs medium：{kpi_uf_x:.2f}x FPS 差距的含义</div>
         {block3.replace(chr(10), '<br>')}
     </div>
+    {block4_html}
 </div>
 
 <!-- Engineering Advice -->
