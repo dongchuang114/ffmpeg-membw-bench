@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -99,12 +99,12 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 .char-tag { background:#21262d; color:#79c0ff; padding:2px 8px; border-radius:4px; font-size:0.8em; }
 .pressure-row { display:flex; gap:8px; margin-bottom:10px; }
 .pbadge { padding:3px 10px; border-radius:10px; font-size:0.8em; font-weight:600; color:#fff; }
-.plevel-极低 { background:#1a6b3c; }
-.plevel-低   { background:#2ea043; }
-.plevel-中   { background:#9a6700; }
-.plevel-中等 { background:#9a6700; }
-.plevel-高   { background:#b45309; }
-.plevel-极高 { background:#b91c1c; }
+.plevel-minimal { background:#1a6b3c; }
+.plevel-low   { background:#2ea043; }
+.plevel-medium   { background:#9a6700; }
+.plevel-medium { background:#9a6700; }
+.plevel-high   { background:#b45309; }
+.plevel-critical { background:#b91c1c; }
 .expected-text { color:#8b949e; font-size:0.9em; margin-bottom:10px; }
 .result-row { display:flex; gap:20px; font-size:0.95em; }
 /* Scenario comparison table */
@@ -121,7 +121,7 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <div class="header"><div class="container">
   <div>
     <h1>FFmpeg Memory Bandwidth - Channel Comparison</h1>
-    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 3 configurations tested &bull; 2025-06-06 01:01:59</div>
+    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 4 configurations tested &bull; 2025-06-05 19:56:07</div>
   </div>
   <div><span class="badge orange">Multi-Channel</span></div>
 </div></div>
@@ -131,22 +131,25 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
   <li><a href="#bandwidth">DRAM BW</a></li>
   <li><a href="#efficiency">Efficiency</a></li>
   <li><a href="#analysis">Key Findings</a></li>
-  <li><a href="#scene-analysis">场景对比分析</a></li>
-  <li><a href="#cpu-baseline">CPU能力参考</a></li>
-  <li><a href="#recommendation">减配建议</a></li>
+  <li><a href="#scene-analysis">Scenario Comparison</a></li>
+  <li><a href="#cpu-baseline">CPU Baseline</a></li>
+  <li><a href="#recommendation">Reduction Recommendations</a></li>
 </ul></nav>
 <div class="container">
+<section id="sysinfo-bar" style="background:#161b22;border-bottom:1px solid #30363d;padding:10px 0;margin-bottom:0;">
+<div class="container">
+<div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;margin-bottom:6px;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Hardware</strong><span><strong style="color:#c9d1d9;">CPU</strong>&nbsp;AMD EPYC 9354 32-Core Processor</span>&ensp;<span><strong style="color:#c9d1d9;">Sockets</strong>&nbsp;2</span>&ensp;<span><strong style="color:#c9d1d9;">vCPUs</strong>&nbsp;128</span>&ensp;<span><strong style="color:#c9d1d9;">NUMA</strong>&nbsp;2</span>&ensp;<span><strong style="color:#c9d1d9;">Host</strong>&nbsp;DeepSeek</span></div><div style="display:flex;flex-wrap:wrap;gap:20px;font-size:0.82em;color:#8b949e;align-items:center;"><strong style="color:#6e7681;font-size:0.9em;min-width:80px;">Software</strong><span><strong style="color:#c9d1d9;">OS</strong>&nbsp;Ubuntu 22.04.5 LTS</span>&ensp;<span><strong style="color:#c9d1d9;">Kernel</strong>&nbsp;6.8.0-86-generic</span>&ensp;<span><strong style="color:#c9d1d9;">FFmpeg</strong>&nbsp;FFmpeg 4.4.2</span>&ensp;<span><strong style="color:#c9d1d9;">Instances</strong>&nbsp;128x1t</span>&ensp;<span><strong style="color:#c9d1d9;">Source</strong>&nbsp;/dev/shm (tmpfs, 4K YUV420)</span></div></div></section>
 
 <section id="summary" class="section">
 <h2>Performance Summary</h2>
 <div class="card-grid">
-  <div class="metric-card"><div class="value">18</div><div class="unit">channels</div><div class="label">Best Configuration</div></div>
-  <div class="metric-card"><div class="value">676.0</div><div class="unit">FPS</div><div class="label">Peak Total Throughput</div></div>
-  <div class="metric-card"><div class="value">3</div><div class="unit">configs</div><div class="label">Tested Configurations</div></div>
-  <div class="metric-card"><div class="value">7.8</div><div class="unit">GB/s</div><div class="label">Peak Est. DRAM BW</div></div>
+  <div class="metric-card"><div class="value">24</div><div class="unit">channels</div><div class="label">Best Configuration</div></div>
+  <div class="metric-card"><div class="value">289.8</div><div class="unit">FPS</div><div class="label">Peak Total Throughput</div></div>
+  <div class="metric-card"><div class="value">4</div><div class="unit">configs</div><div class="label">Tested Configurations</div></div>
+  <div class="metric-card"><div class="value">3.4</div><div class="unit">GB/s</div><div class="label">Peak Est. DRAM BW</div></div>
 </div>
 <div class="card"><h3>Complete Results Table</h3>
-<table><thead><tr><th>Channels</th><th>Single FPS (A)</th><th>Total FPS 38x (B)</th><th>Avg FPS/inst (B)</th><th>x264 Total (D)</th><th>Est. DRAM BW (GB/s)</th><th>FPS/Channel (B)</th></tr></thead><tbody><tr><td>12</td><td>0.0</td><td>126.1</td><td>3.31</td><td>0.0</td><td>1.46</td><td>10.51</td></tr><tr class="highlight"><td>18</td><td>0.0</td><td>676.0</td><td>1.76</td><td>0.0</td><td>7.83</td><td>37.56</td></tr><tr><td>24</td><td>0.0</td><td>676.0</td><td>1.76</td><td>0.0</td><td>7.83</td><td>28.17</td></tr></tbody></table></div>
+<table><thead><tr><th>Channels</th><th>Single FPS (A)</th><th>Total FPS 128x (B)</th><th>Avg FPS/inst (B)</th><th>x264 Total (D)</th><th>Est. DRAM BW (GB/s)</th><th>FPS/Channel (B)</th></tr></thead><tbody><tr><td>4</td><td>0.0</td><td>242.0</td><td>1.89</td><td>0.0</td><td>2.8</td><td>180.6</td><td>60.49</td></tr><tr><td>8</td><td>0.0</td><td>281.6</td><td>2.2</td><td>0.0</td><td>3.26</td><td>183.1</td><td>35.2</td></tr><tr><td>12</td><td>0.0</td><td>281.6</td><td>2.2</td><td>0.0</td><td>3.26</td><td>185.3</td><td>23.47</td></tr><tr class="highlight"><td>24</td><td>0.0</td><td>289.8</td><td>2.26</td><td>0.0</td><td>3.36</td><td>188.7</td><td>12.07</td></tr></tbody></table></div>
 </section>
 
 <section id="throughput" class="section">
@@ -158,10 +161,12 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <section id="bandwidth" class="section">
 <h2>Estimated DRAM Bandwidth Utilization</h2>
 <div class="chart-wrap"><div class="chart-title">Estimated DRAM Read Bandwidth</div><div class="chart-legend" id="leg-bw"></div><canvas id="chart-bw"></canvas></div>
+<div class="chart-wrap"><div class="chart-title">Actual Memory Used (GB, Group B)</div><div class="chart-legend" id="leg-mem"></div><canvas id="chart-mem"></canvas></div>
 <div class="card"><h3>Bandwidth Estimation Method</h3>
 <p>Each 4K YUV420p frame = 3840 x 2160 x 1.5 bytes = 11.9 MB</p>
 <p>Estimated DRAM Read (GB/s) = Total_FPS x 11.9 MB / 1024</p>
 <p style="color:#8b949e;margin-top:8px;">STREAM benchmark not yet run.</p>
+<p style="color:#8b949e;margin-top:4px;font-size:0.9em;">Note: I/O wait is 0 throughout all tests &mdash; video source is served from /dev/shm (tmpfs), no physical disk I/O occurs.</p>
 </div>
 </section>
 
@@ -173,45 +178,49 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <section id="analysis" class="section">
 <h2>Key Findings</h2>
 <div class="card"><h3>Best Configuration</h3>
-<p>Highest throughput at <span class="highlight">18 channels</span> with <span class="highlight">676.0 total FPS</span>.</p>
+<p>Highest throughput at <span class="highlight">24 channels</span> with <span class="highlight">289.8 total FPS</span>.</p>
 </div>
 <div class="card"><h3>Channel Scaling</h3>
-<table><thead><tr><th>From</th><th>To</th><th>FPS Delta</th><th>Scaling</th></tr></thead><tbody><tr><td>12ch</td><td>18ch</td><td>+549.9</td><td>+435.9%</td></tr><tr><td>18ch</td><td>24ch</td><td>-0.1</td><td>-0.0%</td></tr></tbody></table></div>
+<table><thead><tr><th>From</th><th>To</th><th>FPS Delta</th><th>Scaling</th></tr></thead><tbody><tr><td>4ch</td><td>8ch</td><td>+39.6</td><td>+16.4%</td></tr><tr><td>8ch</td><td>12ch</td><td>+0.0</td><td>+0.0%</td></tr><tr><td>12ch</td><td>24ch</td><td>+8.2</td><td>+2.9%</td></tr></tbody></table></div>
 <div class="card"><h3>Methodology</h3>
 <ul style="padding-left:20px;line-height:2;">
 <li>Input: 4K (3840x2160) YUV420p 30fps from /dev/shm</li>
 <li>Encoder: libx265 preset medium, ref=5, bframes=3</li>
-<li>Parallelism: 38 instances (1 per CCD), each 1 threads, numactl bound</li>
+<li>Parallelism: 128 instances (1 per CCD), each 1 threads, numactl bound</li>
 <li>NUMA: instances distributed round-robin across NUMA nodes</li>
 </ul></div>
 </section>
 
 <section id="scene-analysis" class="section">
-<h2>场景对比分析</h2>
+<h2>Scenario Comparison</h2>
 <div class="card">
-<h3>各组 FPS 汇总（通道数 x 场景）</h3>
-<table class="scenario-table"><thead><tr><th>组</th><th>场景</th><th>12ch</th><th>18ch</th><th>24ch</th><th>最大降幅</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>视频云 4K x265 medium</td><td>126.1</td><td>676.0</td><td>676.0</td><td class="drop-red">81.3%</td></tr></tbody></table></div>
-<div class="chart-wrap"><div class="chart-title">各场景 FPS 最大降幅（最高通道-最低通道）</div><div class="chart-legend" id="leg-drop"></div><canvas id="chart-drop"></canvas></div>
+<h3>FPS Summary per Group (Memory Channels x Scenario)</h3>
+<table class="scenario-table"><thead><tr><th>Group</th><th>Scenario</th><th>4ch</th><th>8ch</th><th>12ch</th><th>24ch</th><th>Max Drop</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>Cloud Video 4K x265 medium</td><td>242.0</td><td>281.6</td><td>281.6</td><td>289.8</td><td class="drop-yellow">16.5%</td></tr></tbody></table></div>
+<div class="chart-wrap"><div class="chart-title">Max FPS Drop per Scenario (Highest vs. Lowest Channel Count)</div><div class="chart-legend" id="leg-drop"></div><canvas id="chart-drop"></canvas></div>
 </section>
 
 <section id="cpu-baseline" class="section">
-<h2>CPU能力参考（单路基准）</h2>
+<h2>CPU Capacity Reference (Single-Instance Baseline)</h2>
 <div class="card">
-<p>Group A 单实例基准（4K x265 medium，无内存竞争，numactl node0）：</p>
+<p>Group A single-instance baseline (4K x265 medium, no memory contention, numactl node0):</p>
 <div style="display:flex;gap:32px;margin:12px 0;">
-<div class="metric-card" style="text-align:center;"><div class="value">0.0</div><div class="unit">FPS</div><div class="label">A组单实例（最高通道数）</div></div>
-<div class="metric-card" style="text-align:center;"><div class="value">0.0</div><div class="unit">FPS</div><div class="label">理论CPU峰值（x实例数）</div></div>
+<div class="metric-card" style="text-align:center;"><div class="value">0.0</div><div class="unit">FPS</div><div class="label">Group A Single Instance (Max Channels)</div></div>
+<div class="metric-card" style="text-align:center;"><div class="value">0.0</div><div class="unit">FPS</div><div class="label">Theoretical CPU Peak (x Instances)</div></div>
 </div>
-<p style="color:#8b949e;">理论CPU峰值代表无内存瓶颈时的编码上限。B组实测总FPS与此值的差距即为内存带宽瓶颈导致的损失。</p>
+<p style="color:#8b949e;">Theoretical CPU peak = encoding ceiling with no memory bottleneck. BThe gap between Group B measured FPS and this value reflects memory bandwidth constraints.</p>
 </div>
 </section>
 
 <section id="recommendation" class="section">
-<h2>内存减配建议</h2>
-<table class="scenario-table"><thead><tr><th>组</th><th>场景</th><th>用途</th><th>12ch</th><th>18ch</th><th>24ch</th><th>结论</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>视频云 4K x265 medium</td><td>核心参考</td><td class="drop-red">81.3%</td><td class="drop-green">0.0%</td><td class="drop-green">0.0%</td><td><span class="recommend-no">不建议减配</span></td></tr></tbody></table><div class="card" style="margin-top:16px;"><h3>结论</h3><ul style="padding-left:20px;line-height:2;"><li>B组降幅 81.3%，不建议减配</li></ul></div></section>
+<h2>Memory Reduction Recommendations</h2>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px;">
+<div class="card" style="border-left:3px solid #3fb950;"><h3 style="color:#3fb950;">Best Performance</h3><div class="card-grid" style="grid-template-columns:1fr 1fr 1fr;"><div class="metric-card"><div class="value">24</div><div class="unit">channels</div><div class="label">Configuration</div></div><div class="metric-card"><div class="value">289.8</div><div class="unit">FPS</div><div class="label">Total Throughput</div></div><div class="metric-card"><div class="value">188.7</div><div class="unit">GB</div><div class="label">Mem Used</div></div></div><p style="color:#8b949e;font-size:0.9em;margin-top:8px;">Maximum transcoding throughput. Recommended for latency-sensitive or peak-load workloads.</p></div>
+<div class="card" style="border-left:3px solid #d29922;"><h3 style="color:#d29922;">Best Cost-Efficiency</h3><div class="card-grid" style="grid-template-columns:1fr 1fr 1fr;"><div class="metric-card"><div class="value">8</div><div class="unit">channels</div><div class="label">Configuration</div></div><div class="metric-card"><div class="value">281.6</div><div class="unit">FPS</div><div class="label">Total Throughput</div></div><div class="metric-card"><div class="value">-2.8%</div><div class="unit">vs peak</div><div class="label">FPS Trade-off</div></div></div><p style="color:#8b949e;font-size:0.9em;margin-top:8px;">Within 10% of peak FPS at 8 channels. FPS/Channel ratio: 35.2. Reduces memory channel cost while maintaining acceptable throughput.</p></div>
+</div>
+<table class="scenario-table"><thead><tr><th>Group</th><th>Scenario</th><th>Use Case</th><th>4ch</th><th>8ch</th><th>12ch</th><th>24ch</th><th>Conclusion</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>Cloud Video 4K x265 medium</td><td>Core Reference</td><td class="drop-yellow">16.5%</td><td class="drop-green">2.8%</td><td class="drop-green">2.8%</td><td class="drop-green">0.0%</td><td><span class="recommend-warn">Reduce with Caution</span></td></tr></tbody></table><div class="card" style="margin-top:16px;"><h3>Conclusion</h3><ul style="padding-left:20px;line-height:2;"><li>B: FPS drop 16.5%, reduce with caution</li></ul></div></section>
 
 </div>
-<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-06 01:01:59</div></footer>
+<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-05 19:56:07</div></footer>
 <script>
 
 function show(id, el) {
@@ -380,26 +389,29 @@ function drawLineChart(canvasId, legendId, labels, datasets, yLabel) {
 
 window.onload = function() {
   document.querySelector('.nav a').click();
-  var labels = ["12ch", "18ch", "24ch"];
+  var labels = ["4ch", "8ch", "12ch", "24ch"];
   drawLineChart('chart-fps', 'leg-fps', labels, [
-    {label:'Group A (single x265)', data:[0.0,0.0,0.0]},
-    {label:'Group B 4K x265 medium', data:[126.14,676.02,675.96]},
-    {label:'Group C 4K x265 slow', data:[0.0,0.0,0.0], dashed:true},
-    {label:'Group D 4K x264 medium', data:[0.0,0.0,0.0], dashed:true},
-    {label:'Group E decode', data:[0.0,0.0,0.0], dashed:true},
-    {label:'Group F 1080p ultrafast', data:[0.0,0.0,0.0], dashed:true},
-    {label:'Group G 4K slow ref=8', data:[0.0,0.0,0.0], dashed:true}
+    {label:'Group A (single x265)', data:[0.0,0.0,0.0,0.0]},
+    {label:'Group B 4K x265 medium', data:[241.98,281.6,281.6,289.78]},
+    {label:'Group C 4K x265 slow', data:[0.0,0.0,0.0,0.0], dashed:true},
+    {label:'Group D 4K x264 medium', data:[0.0,0.0,0.0,0.0], dashed:true},
+    {label:'Group E decode', data:[0.0,0.0,0.0,0.0], dashed:true},
+    {label:'Group F 1080p ultrafast', data:[0.0,0.0,0.0,0.0], dashed:true},
+    {label:'Group G 4K slow ref=8', data:[0.0,0.0,0.0,0.0], dashed:true}
   ], 'FPS');
   drawLineChart('chart-fps-avg', 'leg-fps-avg', labels, [
-    {label:'Avg FPS/instance (B)', data:[3.31,1.76,1.76]}
+    {label:'Avg FPS/instance (B)', data:[1.89,2.2,2.2,2.26]}
   ], 'FPS/instance');
   drawBarChart('chart-bw', 'leg-bw', labels, [
-    {label:'Estimated DRAM Read (GB/s)', data:[1.46,7.83,7.83]}
+    {label:'Estimated DRAM Read (GB/s)', data:[2.8,3.26,3.26,3.36]}
   ], 'GB/s');
   drawBarChart('chart-eff', 'leg-eff', labels, [
-    {label:'FPS per Channel (B)', data:[10.51,37.56,28.17]}
+    {label:'FPS per Channel (B)', data:[60.49,35.2,23.47,12.07]}
   ], 'FPS/ch');
-  drawBarChart('chart-drop', 'leg-drop', ["B", "C", "D", "E", "F", "G"],[{label:'FPS最大降幅(%)', data:[81.3,0.0,0.0,0.0,0.0,0.0]}],'降幅 %');
+  drawBarChart('chart-mem', 'leg-mem', labels, [
+    {label:'Memory Used (GB)', data:[180.6,183.12,185.35,188.69]}
+  ], 'GB');
+  drawBarChart('chart-drop', 'leg-drop', ["B", "C", "D", "E", "F", "G"],[{label:'Max FPS Drop(%)', data:[16.5,0.0,0.0,0.0,0.0,0.0]}],'Drop %');
 };
 </script>
 </body>
