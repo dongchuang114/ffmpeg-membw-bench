@@ -6,6 +6,7 @@
 <title>FFmpeg Memory BW - Multi-Channel Comparison</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
 body {
   background: #0d1117;
   color: #c9d1d9;
@@ -58,7 +59,6 @@ a:hover { text-decoration: underline; }
   color: #c9d1d9;
 }
 .section { padding: 20px 0; display: block; margin-bottom: 32px; }
-.section.active { display: block; }
 .card {
   background: #161b22;
   border: 1px solid #30363d;
@@ -121,19 +121,19 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <div class="header"><div class="container">
   <div>
     <h1>FFmpeg Memory Bandwidth - Channel Comparison</h1>
-    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 3 configurations tested &bull; 2025-06-06 20:14:05</div>
+    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 3 configurations tested &bull; 2025-06-06 00:51:58</div>
   </div>
   <div><span class="badge orange">Multi-Channel</span></div>
 </div></div>
 <nav class="nav"><ul>
-  <li><a href="#" onclick="show('summary',this);return false;">Summary</a></li>
-  <li><a href="#" onclick="show('throughput',this);return false;">Throughput</a></li>
-  <li><a href="#" onclick="show('bandwidth',this);return false;">DRAM BW</a></li>
-  <li><a href="#" onclick="show('efficiency',this);return false;">Efficiency</a></li>
-  <li><a href="#" onclick="show('analysis',this);return false;">Key Findings</a></li>
-  <li><a href="#" onclick="show('scene-analysis',this);return false;">场景对比分析</a></li>
-  <li><a href="#" onclick="show('cpu-baseline',this);return false;">CPU能力参考</a></li>
-  <li><a href="#" onclick="show('recommendation',this);return false;">减配建议</a></li>
+  <li><a href="#summary">Summary</a></li>
+  <li><a href="#throughput">Throughput</a></li>
+  <li><a href="#bandwidth">DRAM BW</a></li>
+  <li><a href="#efficiency">Efficiency</a></li>
+  <li><a href="#analysis">Key Findings</a></li>
+  <li><a href="#scene-analysis">场景对比分析</a></li>
+  <li><a href="#cpu-baseline">CPU能力参考</a></li>
+  <li><a href="#recommendation">减配建议</a></li>
 </ul></nav>
 <div class="container">
 
@@ -211,7 +211,7 @@ footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color
 <table class="scenario-table"><thead><tr><th>组</th><th>场景</th><th>用途</th><th>12ch</th><th>18ch</th><th>24ch</th><th>结论</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>视频云 4K x265 medium</td><td>核心参考</td><td class="drop-red">81.3%</td><td class="drop-green">0.0%</td><td class="drop-green">0.0%</td><td><span class="recommend-no">不建议减配</span></td></tr></tbody></table><div class="card" style="margin-top:16px;"><h3>结论</h3><ul style="padding-left:20px;line-height:2;"><li>B组降幅 81.3%，不建议减配</li></ul></div></section>
 
 </div>
-<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-06 20:14:05</div></footer>
+<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-06 00:51:58</div></footer>
 <script>
 
 function show(id, el) {
