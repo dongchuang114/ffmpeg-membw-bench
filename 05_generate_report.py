@@ -126,6 +126,7 @@ def collect_multi_results(results_dir):
 
 DARK_CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
 body {
   background: #0d1117;
   color: #c9d1d9;
@@ -178,7 +179,6 @@ a:hover { text-decoration: underline; }
   color: #c9d1d9;
 }
 .section { padding: 20px 0; display: block; margin-bottom: 32px; }
-.section.active { display: block; }
 .card {
   background: #161b22;
   border: 1px solid #30363d;
@@ -594,9 +594,9 @@ def build_single_report(result_dir, stream_peak=None):
         '  <div><span class="badge">' + str(channels) + 'ch DDR5</span></div>\n'
         '</div></div>\n'
         '<nav class="nav"><ul>\n'
-        '  <li><a href="#" onclick="show(\'overview\',this);return false;">Overview</a></li>\n'
-        '  <li><a href="#" onclick="show(\'details\',this);return false;">Group Details</a></li>\n'
-        '  <li><a href="#" onclick="show(\'sysinfo\',this);return false;">System Info</a></li>\n'
+        '  <li><a href="#overview">Overview</a></li>\n'
+        '  <li><a href="#details">Group Details</a></li>\n'
+        '  <li><a href="#sysinfo">System Info</a></li>\n'
         '</ul></nav>\n'
         '<div class="container">\n'
         '\n'
@@ -875,14 +875,14 @@ def build_multi_report(all_results, stream_peak=None):
         '  <div><span class="badge orange">Multi-Channel</span></div>\n'
         '</div></div>\n'
         '<nav class="nav"><ul>\n'
-        '  <li><a href="#" onclick="show(\'summary\',this);return false;">Summary</a></li>\n'
-        '  <li><a href="#" onclick="show(\'throughput\',this);return false;">Throughput</a></li>\n'
-        '  <li><a href="#" onclick="show(\'bandwidth\',this);return false;">DRAM BW</a></li>\n'
-        '  <li><a href="#" onclick="show(\'efficiency\',this);return false;">Efficiency</a></li>\n'
-        '  <li><a href="#" onclick="show(\'analysis\',this);return false;">Key Findings</a></li>\n'
-        '  <li><a href="#" onclick="show(\'scene-analysis\',this);return false;">场景对比分析</a></li>\n'
-        '  <li><a href="#" onclick="show(\'cpu-baseline\',this);return false;">CPU能力参考</a></li>\n'
-        '  <li><a href="#" onclick="show(\'recommendation\',this);return false;">减配建议</a></li>\n'
+        '  <li><a href="#summary">Summary</a></li>\n'
+        '  <li><a href="#throughput">Throughput</a></li>\n'
+        '  <li><a href="#bandwidth">DRAM BW</a></li>\n'
+        '  <li><a href="#efficiency">Efficiency</a></li>\n'
+        '  <li><a href="#analysis">Key Findings</a></li>\n'
+        '  <li><a href="#scene-analysis">场景对比分析</a></li>\n'
+        '  <li><a href="#cpu-baseline">CPU能力参考</a></li>\n'
+        '  <li><a href="#recommendation">减配建议</a></li>\n'
         '</ul></nav>\n'
         '<div class="container">\n'
         '\n'

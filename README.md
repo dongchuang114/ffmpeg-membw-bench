@@ -1,955 +1,119 @@
-# ffmpeg-membw-bench
+# FFmpeg Memory Bandwidth Benchmark — 操作手册
 
-AMD EPYC 服务器 FFmpeg 内存带宽基准测试工具。
-通过 BIOS 禁用 DIMM 模拟不同内存通道数（2/4/8/12/16/24ch），测量 FFmpeg 转码性能变化，
-为 AMD EPYC 服务器核存比优化提供数据支撑。
+## 项目简介
 
----
-
-## 目录
-
-- [背景与目标](#背景与目标)
-- [测试用例设计](#测试用例设计)
-- [硬件要求](#硬件要求)
-- [快速开始](#快速开始)
-- [完整操作步骤](#完整操作步骤)
-- [报告查看（SSH 隧道）](#报告查看ssh-隧道)
-- [多通道扫描（调整 BIOS）](#多通道扫描调整-bios)
-- [脚本参数参考](#脚本参数参考)
-- [CCD 自动检测与实例数](#ccd-自动检测与实例数)
-- [目标 FPS 模式（反向资源查询）](#目标-fps-模式反向资源查询)
-- [多实例并发扩展测试（核心对比实验）](#多实例并发扩展测试核心对比实验)
-  - [为什么要做多实例扩展测试](#为什么要做多实例扩展测试)
-  - [多实例扩展测试步骤](#多实例扩展测试步骤)
-  - [ultrafast 预设内存压力测试](#ultrafast-预设内存压力测试)
-  - [实验结论与最优配置建议](#实验结论与最优配置建议)
-- [结果 JSON 字段说明（v1.1）](#结果-json-字段说明v11)
-- [输出目录结构](#输出目录结构)
-- [故障排除](#故障排除)
-- [版本历史](#版本历史)
+本项目测试不同 CPU 平台在不同内存通道数配置下的 FFmpeg 转码吞吐量，
+用于量化内存带宽对编码性能的影响，为核存比优化提供数据依据。
 
 ---
 
-## 背景与目标
+## 环境准备（每次重启后必须执行）
 
-**问题**：内存价格上涨，客户想知道：减少内存通道数（通过 BIOS 禁用 DIMM）后，
-FFmpeg 转码性能会下降多少？什么样的核存比配置最具性价比？
+进入项目目录后，运行输入文件准备脚本：
 
-**目标**：
-1. 量化不同内存通道数下的 FFmpeg 转码 FPS
-2. 找到"性能损失可接受"的最低内存配置（FPS 拐点）
-3. 为 AMD EPYC 服务器提供最优核存比建议，提升竞争力
+    bash 00_prepare_input.sh
+
+该脚本会生成 4K 测试素材到 /dev/shm/（内存盘，重启后消失）。
 
 ---
 
-## 测试用例设计
+## 参数说明
 
-### 为什么用 4K 分辨率（不用 1080p）
+    bash 03_run_membw_bench.sh [选项]
 
-AMD EPYC 9T24 共有 24 个 CCD，每个 CCD 有 32MB L3，总计 768MB L3 缓存。
+| 参数             | 说明                                                              | 默认值            |
+|------------------|-------------------------------------------------------------------|-------------------|
+| --group X        | 只跑指定测试组（A/B/C/D/E/F/G 或 ALL）                           | ALL               |
+| --channels N     | 当前内存通道数（仅用于目录命名，不控制硬件）                      | 24                |
+| --instances N    | 并发 FFmpeg 实例数                                                | 自动 = CCD 数     |
+| --threads N      | 每实例线程数                                                      | 自动 = nproc/CCD  |
+| --duration N     | 每路编码的视频时长（秒），不是运行时间                            | 60                |
+| --output-dir PATH| 自定义输出目录（指定后覆盖 --channels 自动命名）                  | 自动按通道数命名  |
 
-1080p 每帧仅 3MB，24 个实例的 working set 约 360MB，完全放入 768MB L3，
-削减内存通道后 FPS 不变 → 1080p 测试无效。
-
-4K 每帧 12MB，ref=5 参考帧的 working set 约 60MB/实例，超过单 CCD 的 32MB L3，
-必须从 DRAM 加载参考帧 → 内存带宽成为真实瓶颈 → 测试有效。
-
-### 为什么用 CCD 数量作为默认并行实例数
-
-```
-CCD 数量 x 8核/CCD x 2线程(SMT) = 系统最大线程数
-实例数 = CCD 数量，每实例 -threads (8核x2SMT=16) → 线程数完全匹配，无过载
-```
-
-**v1.1 起**，脚本自动探测当前 CPU 的 CCD 数（通过 L3 cache 共享域），
-以此作为默认并行实例数，无需手动维护。EPYC 9T24（24 CCD）默认 24 实例，
-其他型号自动适配。
-
-每个 ffmpeg 实例通过 numactl 按 round-robin 策略分配 NUMA 节点，
-支持任意节点数（不再固定为 2 节点各半）。
-
-每实例 `-threads` 数同样自动计算（`nproc ÷ CCD 数`），确保每实例恰好占满一个 CCD。
-SMT 关闭时自动减半，无需手动调整。
-
-### 测试组说明（A-H）
-
-| 组 | 实例数 | 配置 | 测试目的 |
-|----|--------|------|----------|
-| **A** | 1 | x265 medium ref=5 | **CPU 上限基准**：无内存竞争时单 CCD 能跑多少 FPS（基准线） |
-| **B** | 24 | x265 medium ref=5 | **主测试**：满核满载，真实生产场景，内存带宽是否成瓶颈 |
-| **C** | 24 | x265 slow | **高压力测试**：更大运动估计范围，更高内存带宽需求 |
-| **D** | 24 | x264 medium | **编码器对比**：x264 vs x265 对内存带宽的敏感度差异 |
-| **E** | 24 | 纯解码 | **读带宽极限**：纯读场景，找到 DRAM 读带宽饱和点 |
-| **F** | CCD数 | 1080p x265 ultrafast | **直播低延迟**：低分辨率低计算量，内存压力极低，可大幅减配 |
-| **G** | CCD数 | 4K x265 slow ref=8 | **高质量归档**：最大运动估计范围和参考帧，内存压力最大，不建议减配 |
-| **H** | CCD数 | 4K x265 ultrafast | **内存带宽压测**：禁用 ME 后以内存读写为主要瓶颈，FFmpeg 内最接近内存带宽受限的编码负载 |
-| **I** | CCD数 | 4K SVT-AV1 preset=10 | **AV1 编码基准**：下一代编解码，压缩率高于 H.265 约 20-30%，YouTube/Netflix 同类工作负载 |
-
-**如何看结果**：
-- A 组 FPS × 24 = 理论 CPU 峰值（无内存限制时）
-- B 组 FPS 接近理论峰值 → 内存带宽充足，可以减配
-- B 组 FPS 明显低于理论峰值 → 内存带宽已是瓶颈，减配会影响性能
-- 多通道对比中 B 组 FPS 的拐点 = 建议最低内存通道数
-
-### 当前测试结果（24ch 满配，参考值）
-
-| 组 | 总 FPS | 单实例平均 FPS | 说明 |
-|----|--------|----------------|------|
-| A（单实例） | 13.00 | 13.00 | 单 CCD 上限 |
-| B（x265 medium） | 288.00 | 12.00 | 理论峰值 312，实际 288，带宽效率 92% |
-| C（x265 slow） | 138.58 | 5.77 | slow 预设更耗内存带宽 |
-| D（x264 medium） | 1028.40 | 42.85 | x264 带宽敏感度低，FPS 高 3x |
-| E（纯解码） | 8187.00 | 341.12 | 读密集型，带宽利用率最高 |
+注意：--duration 60 表示每路编码 60 秒的视频内容，单线程下实际运行时间远超 60 秒。
 
 ---
 
-## 硬件要求
+## 测试组说明（A～G）
 
-| 项目 | 要求 |
-|------|------|
-| CPU | AMD EPYC 多核处理器（本工具为 EPYC 9T24 2P 设计） |
-| 内存 | DDR5，建议满配 24-channel（测试不同减配场景） |
-| /dev/shm | 至少 4GB 可用（存放 4K 测试素材） |
-| FFmpeg | 4.4+，需带 libx264 和 libx265 |
-| 工具 | numactl，bc，python3，screen，jq |
-
-检查工具是否就绪：
-
-```bash
-ffmpeg -version 2>&1 | head -1
-numactl --hardware
-which bc jq screen python3
-df -h /dev/shm
-```
+| 组 | 场景               | 分辨率 | 编码器         | 实例数  | 典型用途                       |
+|----|--------------------|--------|----------------|---------|--------------------------------|
+| A  | 单实例基准         | 4K     | x265 medium    | 1       | CPU 单路上限，理论峰值基准     |
+| B  | 视频云并发转码     | 4K     | x265 medium    | CCD 数  | 核心对比组，最典型云转码场景   |
+| C  | 视频归档（标准）   | 4K     | x265 slow      | CCD 数  | 慢预设，更耗内存带宽           |
+| D  | 编码器对比         | 4K     | x264 medium    | CCD 数  | x264 带宽敏感度低，作为参照   |
+| E  | CDN 回源（纯解码） | 4K     | decode only    | CCD 数  | 纯读密集，最高带宽利用率       |
+| F  | 直播低延迟推流     | 1080p  | x265 ultrafast | CCD 数  | 低质量要求，最高吞吐           |
+| G  | 视频归档（高质量） | 4K     | x265 slow ref=8| CCD 数  | 更高质量，带宽压力最大         |
 
 ---
 
-## 快速开始
+## 场景一：同通道数，跑 A～G 全组，生成综合报告
 
-```bash
-# 1. 进入项目目录（根据实际路径调整）
-cd /path/to/ffmpeg-membw-bench
+适合第一次跑完整基线数据。
 
-# 2. 生成 4K 测试素材（约 2 分钟，服务器重启后需重新生成）
-bash 00_prepare_input.sh
+    # 1. 后台运行（24ch 为例）
+    screen -S bench24 -dm bash -c "bash 03_run_membw_bench.sh --channels 24 --duration 60 > /tmp/bench24.log 2>&1"
 
-# 3. 跑完整测试（实例数和线程数自动按 CCD 探测，screen 后台，约 8-10 分钟）
-screen -S bench -dm bash -c "bash $(pwd)/03_run_membw_bench.sh --channels 24 --duration 60 > /tmp/bench.log 2>&1"
-tail -f /tmp/bench.log
+    # 2. 查看进度
+    tail -f /tmp/bench24.log
 
-# 4. 生成报告（替换 TIMESTAMP 为实际值）
-python3 05_generate_report.py --mode single --result-dir results/24ch_TIMESTAMP
-
-# 5. 启动 HTTP 服务
-screen -S http -dm bash -c "cd $(pwd) && python3 -m http.server 8085"
-```
-
-然后在笔记本建 SSH 隧道查看报告（见下方章节）。
+    # 3. 跑完后生成单通道综合报告（TIMESTAMP 替换为实际目录名，用 ls results/ 查看）
+    python3 05_generate_report.py --mode single --result-dir results/24ch_TIMESTAMP
 
 ---
 
-## 完整操作步骤
+## 场景二：单独跑某个组（以 Group B 为例）
 
-### Step 1：SSH 登录测试服务器
+### 2.1 在不同通道数下分别跑 Group B
 
-```bash
-ssh <user>@<server-ip>
-```
+每次换 BIOS 通道配置并重启后，依次执行：
 
-### Step 2：生成 4K 测试素材（仅需一次，重启后需重新生成）
+    # 24ch
+    bash 03_run_membw_bench.sh --group B --channels 24 --duration 60
 
-```bash
-cd /path/to/ffmpeg-membw-bench
-bash 00_prepare_input.sh
-```
+    # 换 BIOS 后 → 12ch
+    bash 03_run_membw_bench.sh --group B --channels 12 --duration 60
 
-成功后输出：
+    # 换 BIOS 后 → 8ch
+    bash 03_run_membw_bench.sh --group B --channels 8 --duration 60
 
-```
-[2025-06-05 23:05:00] Input ready: /dev/shm/input_4k_10s.yuv  3.5GB
-```
+结果自动保存到对应目录：
 
-素材存在 `/dev/shm`（内存文件系统），避免磁盘 IO 干扰测试结果。
+    results/
+    ├── 24ch_20250606_100000/groupB_parallel_x265_medium/result.json
+    ├── 12ch_20250606_120000/groupB_parallel_x265_medium/result.json
+    └── 8ch_20250606_140000/groupB_parallel_x265_medium/result.json
 
-### Step 3：运行测试（推荐 screen 后台）
+### 2.2 查看某个通道下 Group B 的独立报告
 
-```bash
-# 进入项目目录
-cd /path/to/ffmpeg-membw-bench
+    python3 05_generate_report.py --mode single --result-dir results/24ch_TIMESTAMP
+    # 报告输出到同目录下的 report.html
 
-# 启动后台测试（SSH 断线不中断）
-# 实例数和线程数自动按 CCD 探测，无需手动指定
-screen -S bench24 -dm bash -c "bash $(pwd)/03_run_membw_bench.sh --channels 24 --duration 60 > /tmp/bench24.log 2>&1"
+### 2.3 生成 Group B 跨通道对比报告
 
-# 查看实时进度
-tail -f /tmp/bench24.log
+所有通道数跑完后，一条命令生成对比：
 
-# 挂载到 screen 交互查看（Ctrl+A D 退出但不停止）
-screen -r bench24
-```
+    python3 05_generate_report.py --mode multi --results-dir results/
+    # 报告输出到 results/multi_channel_comparison.html
 
-进度示例：
-
-```
-[23:43:00] Auto-detected CCD count: 24, using INSTANCES=24
-[23:43:00] Auto-detected threads per CCD: 16, using THREADS=16
-[23:43:00] Detected NUMA nodes: 0 1 (count=2)
-[23:54:18]  Group A: Single instance x265 medium
-[23:56:40] [A] Result: FPS=13.00, frames=1800, elapsed=142s
-[23:56:40]  Group B: 24 parallel x265 medium (ref=5)
-[23:59:13] [B] Total FPS: 288.00, Avg per instance: 12.00
-```
-
-完整测试（A-H 全组 x 60s）约需 **10-12 分钟**。
-
-仅快速验证 A 组（2 分钟）：
-
-```bash
-bash 03_run_membw_bench.sh --channels 24 --group A --duration 30
-```
-
-### Step 4：生成报告
-
-```bash
-# 查看结果目录
-ls results/
-
-# 生成单通道报告（替换 TIMESTAMP）
-python3 05_generate_report.py \
-    --mode single \
-    --result-dir results/24ch_TIMESTAMP
-
-# 多通道对比报告（所有通道跑完后）
-python3 05_generate_report.py \
-    --mode multi \
-    --results-dir results/
-```
-
-### Step 5：启动 HTTP 服务（一次性，保持运行）
-
-```bash
-screen -S membw-http -dm bash -c "cd $(pwd) && python3 -m http.server 8085"
-
-# 验证
-ss -tlnp | grep 8085
-```
+自动扫描 results/ 下所有 {N}ch_TIMESTAMP 目录，同通道多次测试只取最新一次。
 
 ---
 
-## 报告查看（SSH 隧道）
+## 远程查看报告（从笔记本浏览器访问）
 
-服务器无显示器，通过 SSH 端口转发在笔记本浏览器查看。
+**第一步：在测试服务器启动 HTTP 服务**（只需启动一次）
 
-### 第一步：在笔记本新开终端，建立 SSH 隧道
+    screen -S http -dm bash -c "cd /work/ffmpeg-membw-bench && python3 -m http.server 8085"
 
-```bash
-ssh -N -L 8085:<server-ip>:8085 <user>@<server-ip>
-```
+**第二步：在笔记本建立 SSH 隧道**
 
-- `-N`：只建隧道，不执行命令
-- `-L 8085:<server-ip>:8085`：本地 8085 → 服务器 8085
-- 终端会挂起，这是正常的（Ctrl+C 断开隧道）
+    ssh -N -L 8085:10.83.32.80:8085 user@10.83.32.80
 
-### 第二步：笔记本浏览器打开
+**第三步：浏览器打开**
 
-| 报告类型 | 浏览器地址 |
-|----------|------------|
-| 单通道报告 | `http://localhost:8085/results/24ch_TIMESTAMP/report.html` |
-| 多通道对比报告 | `http://localhost:8085/results/multi_channel_comparison.html` |
-| 文件浏览器 | `http://localhost:8085/` |
-
-> 提示：页面空白时按 `Ctrl+Shift+R` 强制刷新。
-
----
-
-## 多通道扫描（调整 BIOS）
-
-每次调整 BIOS 禁用 DIMM 并重启服务器后，跑对应通道测试。
-
-推荐顺序：24ch → 16ch → 12ch → 8ch → 4ch → 2ch
-
-```bash
-cd /path/to/ffmpeg-membw-bench
-
-# 调整 BIOS 并重启后，重新生成素材（/dev/shm 会被清空）
-bash 00_prepare_input.sh
-
-# 跑对应通道（改 --channels 值，实例数和线程数仍自动探测）
-screen -S bench16 -dm bash -c "bash $(pwd)/03_run_membw_bench.sh --channels 16 --duration 60 > /tmp/bench16.log 2>&1"
-
-# 生成该通道报告
-python3 05_generate_report.py --mode single --result-dir results/16ch_TIMESTAMP
-```
-
-所有通道跑完后生成对比报告：
-
-```bash
-python3 05_generate_report.py --mode multi --results-dir results/
-```
-
-BIOS 操作路径（EPYC 9T24 参考）：
-
-```
-进入 BIOS -> Advanced -> Memory Configuration -> DIMM Disable
-选择对应 DIMM 插槽 -> 设为 Disabled -> 保存重启
-```
-
-重启后验证：
-
-```bash
-numactl -H    # 查看每个 NUMA node 内存大小是否减少
-free -h       # 确认总内存符合预期
-```
-
----
-
-## 脚本参数参考
-
-### 03_run_membw_bench.sh
-
-```
-用法: bash 03_run_membw_bench.sh [选项]
-
-必填:
-  --channels N        当前 BIOS 配置的内存通道数（用于目录命名和报告标注）
-
-可选:
-  --duration N        每组持续时间（秒），默认 60
-  --group X           只跑指定组（A/B/C/D/E/F/G/H），默认全部
-  --instances N       手动指定并行实例数（默认：自动探测 CCD 数量）
-  --threads N         手动指定每实例 ffmpeg 线程数（默认：自动，= 总vCPU ÷ CCD数）
-  --target-fps N      目标 FPS 限速（0=不限速，默认 0）
-  --output-dir DIR    指定输出目录（默认 results/Nch_TIMESTAMP）
-  --skip-group X      跳过某个测试组（可多次指定）
-
-示例:
-  # 完整测试（实例数和线程数自动按 CCD 探测）
-  bash 03_run_membw_bench.sh --channels 24 --duration 60
-
-  # 仅跑 A 组快速验证
-  bash 03_run_membw_bench.sh --channels 24 --group A --duration 30
-
-  # 手动指定实例数（覆盖 CCD 自动探测）
-  bash 03_run_membw_bench.sh --channels 24 --instances 12
-
-  # 手动指定线程数（如关闭 SMT 后每 CCD 只有 8 个物理核）
-  bash 03_run_membw_bench.sh --channels 24 --threads 8
-
-  # 目标 FPS 模式：测量 8fps 业务负载下的 CPU 和内存使用量
-  bash 03_run_membw_bench.sh --channels 24 --target-fps 8 --group B
-
-  # 8 通道减配测试
-  bash 03_run_membw_bench.sh --channels 8 --duration 60
-```
-
-### 05_generate_report.py
-
-```
-用法: python3 05_generate_report.py [选项]
-
-  --mode single       生成单通道报告（需指定 --result-dir）
-  --mode multi        生成多通道对比报告（扫描 --results-dir）
-  --result-dir DIR    单通道模式：指定测试结果目录
-  --results-dir DIR   多通道模式：扫描目录，默认 results/
-
-示例:
-  python3 05_generate_report.py --mode single --result-dir results/24ch_20250606_000000
-  python3 05_generate_report.py --mode multi --results-dir results/
-```
-
----
-
-## CCD 自动检测与实例数
-
-v1.1 起，默认实例数和每实例线程数均由系统 CCD 数量自动决定，无需手动维护。
-
-**CCD 探测原理**：AMD EPYC 每个 CCD 独享一个 L3 cache slice。
-通过统计 `/sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list`
-的唯一 L3 共享域数量，得出全系统 CCD 数。
-
-```bash
-# 手动验证 CCD 探测结果
-cut -d, -f1 /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list \
-  | sort -nu | wc -l
-# EPYC 9T24 2P 预期输出：24
-```
-
-| CPU 型号 | CCD 数 | 默认实例数 | 默认 threads |
-|----------|--------|-----------|-------------|
-| EPYC 9T24 2P（SMT on） | 24 | 24 | 16 |
-| EPYC 9T24 1P（SMT on） | 12 | 12 | 16 |
-| EPYC 9374F 1P（SMT on） | 8 | 8 | 8 |
-| EPYC 9T24 2P（SMT off） | 24 | 24 | 8 |
-
-**线程数探测原理**：`threads = nproc ÷ ccd_count`（一个 CCD 内的全部 vCPU 数）。
-这样每个 ffmpeg 实例恰好占满一个 CCD，不跨 CCD 竞争，SMT 利用率最优。
-
-```bash
-# 手动验证线程数计算
-VCPUS=$(nproc)
-CCDS=$(cut -d, -f1 /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list | sort -nu | wc -l)
-echo "threads_per_instance = $VCPUS / $CCDS = $((VCPUS / CCDS))"
-# EPYC 9T24 2P SMT on 预期输出：threads_per_instance = 384 / 24 = 16
-```
-
-SMT 关闭时 `nproc` 减半，自动计算结果相应减半（如 192 ÷ 24 = 8），无需手动调整。
-
-**NUMA 分配策略**：第 i 个实例分配到 `NUMA_NODES[i % numa_count]`，
-替代原来硬编码的 node0/node1 各半，支持 1/2/4 等任意节点数。
-
-若需覆盖自动探测值，使用：
-- `--instances N`：手动指定并行实例数
-- `--threads N`：手动指定每实例线程数
-
----
-
-## 目标 FPS 模式（反向资源查询）
-
-**使用场景**：已知业务目标 FPS（如客户要求每路 8fps），想知道在该负载下
-CPU 利用率和内存带宽是多少，以确认减配方案是否可行。
-
-```bash
-# 示例：在 24ch 满配下，测量每路 8fps 的资源消耗
-cd /path/to/ffmpeg-membw-bench
-screen -S bench -dm bash -c "
-  bash $(pwd)/03_run_membw_bench.sh \
-    --channels 24 \
-    --target-fps 8 \
-    --group B \
-    --duration 60 \
-    > /tmp/bench_8fps.log 2>&1"
-tail -f /tmp/bench_8fps.log
-```
-
-**实现原理**：通过 `-r N -re` 将 ffmpeg 输入帧率限制为 N fps，
-使编码负载线性降低，CPU/内存读写量真实反映该 FPS 下的资源消耗。
-解码组（Group E）不加 `-vf` 滤镜，保持测试语义。
-
-**如何看结果**：
-- `avg_cpu_pct`：该 FPS 下全系统 CPU 平均利用率（含 iowait）
-- `iowait_pct`：CPU 等待 DRAM 响应的时间占比（内存带宽压力指示）
-- `mem_used_gb`：测试期间平均内存占用（GB）
-- `membw_read_gbs`：平均内存读带宽（GB/s）
-
-```bash
-# 查看 target-fps 模式结果
-cat results/24ch_TIMESTAMP/groupB_parallel_x265_medium/result.json | python3 -m json.tool
-```
-
-示例输出（8fps 目标，24ch 满配）：
-```json
-{
-  "target_fps": 8,
-  "avg_fps_per_instance": 7.98,
-  "avg_cpu_pct": 63.4,
-  "iowait_pct": 8.2,
-  "mem_used_gb": 38.1,
-  "membw_read_gbs": 74.3
-}
-```
-
-### 多档 FPS 扫描：反向查资源消耗曲线
-
-对比不同业务 FPS 档位下的 CPU / 内存消耗，找到"资源使用可接受"的最高 FPS 上限：
-
-```bash
-cd /path/to/ffmpeg-membw-bench
-
-# 依次测 4 / 8 / 12 / 16fps，每档结果存独立目录
-for fps in 4 8 12 16; do
-  echo "=== Testing target-fps=${fps} ==="
-  bash 03_run_membw_bench.sh \
-    --channels 24 \
-    --group B \
-    --target-fps ${fps} \
-    --duration 60 \
-    --output-dir /tmp/results_${fps}fps
-done
-```
-
-跑完后用 jq 汇总对比：
-
-```bash
-for fps in 4 8 12 16; do
-  echo -n "target_fps=${fps}  "
-  jq -r '[.target_fps, .avg_fps_per_instance, .avg_cpu_pct, .iowait_pct, .membw_read_gbs] | @tsv' \
-    /tmp/results_${fps}fps/groupB_parallel_x265_medium/result.json
-done
-# 输出示例：
-# target_fps=4   avg=3.99  cpu=18.2%  iowait=1.4%  bw=19.3GB/s
-# target_fps=8   avg=7.98  cpu=35.4%  iowait=3.1%  bw=38.7GB/s
-# target_fps=12  avg=11.96 cpu=52.8%  iowait=5.8%  bw=58.2GB/s
-# target_fps=16  avg=15.91 cpu=70.1%  iowait=9.3%  bw=77.6GB/s
-```
-
-**如何判断减配是否可行**：
-- `avg_cpu_pct` < 80% 且 `iowait_pct` 增幅平稳 → 内存带宽充足，可以减少通道数
-- `iowait_pct` 随 FPS 升高而急剧增大 → 内存带宽已成瓶颈，减配会使实际 FPS 低于目标
-- 找到 `avg_fps_per_instance` 明显低于 `target_fps` 的临界点 → 该点即为当前配置的 FPS 上限
-
----
-
-## 结果 JSON 字段说明（v1.1）
-
-### meta.json 新增字段
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `ccd_count` | int | 自动探测的 CCD 数量 |
-| `instances_auto` | bool | 实例数是否由 CCD 自动决定 |
-| `threads_per_instance` | int | 每实例 ffmpeg `-threads` 值 |
-| `threads_auto` | bool | 线程数是否由自动计算决定 |
-| `numa_nodes` | int[] | 系统 NUMA 节点编号列表 |
-| `numa_count` | int | NUMA 节点总数 |
-| `target_fps` | int | 目标 FPS（0 = 不限速） |
-
-### result.json 新增字段（各测试组）
-
-| 字段 | 单位 | 说明 |
-|------|------|------|
-| `target_fps` | fps | 目标 FPS（继承自启动参数） |
-| `avg_cpu_pct` | % | 测试期间全系统平均 CPU 利用率（含 iowait） |
-| `iowait_pct` | % | CPU 等待 I/O（DRAM 响应）的时间占比 |
-| `mem_used_gb` | GB | 测试期间平均内存使用量（MemTotal - MemAvailable） |
-| `membw_read_gbs` | GB/s | 平均内存读带宽（由 /proc/PID/io rchar 计算） |
-
-> 注：`membw_read_gbs` 基于进程 VFS 读取量，包含对 `/dev/shm`（tmpfs）的读取，
-> 非硬件 PMC 直接测量值，用于相对对比，不代表绝对 DRAM 带宽。
-
----
-
-## 输出目录结构
-
-```
-ffmpeg-membw-bench/
-├── 00_prepare_input.sh         # 生成测试素材
-├── 03_run_membw_bench.sh       # 主测试脚本
-├── 04_collect_metrics.sh       # 实时 CPU/MEM/带宽采样（主脚本自动调用）
-├── 05_generate_report.py       # 报告生成
-├── run_all_channels.sh         # 多通道交互驱动脚本
-├── CHANGELOG.md                # 版本变更记录
-│
-└── results/
-    ├── 24ch_20250606_000000/           # 24 通道测试结果
-    │   ├── groupA_single/
-    │   │   ├── instance_0.log
-    │   │   ├── bandwidth.csv           # CPU/MEM/带宽采样（v1.1 新增）
-    │   │   └── result.json
-    │   ├── groupB_parallel_x265_medium/
-    │   │   ├── instance_0.log ~ instance_23.log
-    │   │   ├── bandwidth.csv
-    │   │   └── result.json
-    │   ├── groupC_parallel_x265_slow/
-    │   ├── groupD_parallel_x264_medium/
-    │   ├── groupE_parallel_decode/
-    │   ├── groupF_parallel_1080p_ultrafast/
-    │   ├── groupG_parallel_x265_slow_ref8/
-    │   ├── groupH_parallel_x265_ultrafast/
-    │   ├── meta.json                   # 硬件/运行参数（含 ccd_count, threads_per_instance）
-    │   └── report.html
-    ├── 16ch_20250607_100000/
-    └── multi_channel_comparison.html
-```
-
----
-
-## 故障排除
-
-### 测试素材不存在
-
-```bash
-ls -lh /dev/shm/input_4k_10s.yuv   # 检查是否存在
-bash 00_prepare_input.sh            # 重新生成（重启后需重跑）
-```
-
-### B 组 FPS 显示为 0
-
-检查实例日志：
-
-```bash
-tail -5 results/24ch_TIMESTAMP/groupB_parallel_x265_medium/instance_0.log
-```
-
-日志为空通常是 ffmpeg 启动失败（输入文件不存在或权限问题）。
-
-### HTTP 服务无法访问
-
-```bash
-# 服务器：检查服务状态
-ss -tlnp | grep 8085
-
-# 重启服务（在项目目录下执行）
-screen -S membw-http -dm bash -c "cd $(pwd) && python3 -m http.server 8085"
-
-# 笔记本：重建隧道
-ssh -N -L 8085:<server-ip>:8085 <user>@<server-ip>
-```
-
-### screen 会话中断
-
-```bash
-screen -ls         # 查看所有会话
-screen -r bench24  # 挂载到 bench24 会话
-```
-
-### CCD 探测结果异常
-
-```bash
-# 手动验证
-cut -d, -f1 /sys/devices/system/cpu/cpu*/cache/index3/shared_cpu_list | sort -nu | wc -l
-lscpu | grep 'L3 cache'
-
-# 若探测失败，手动指定
-bash 03_run_membw_bench.sh --channels 24 --instances 24 --threads 16
-```
-
----
-
-## 多实例并发扩展测试（核心对比实验）
-
-### 为什么要做多实例扩展测试
-
-A-G 组测试固定了实例数（CCD 数量），聚焦于不同内存通道配置下的性能变化。
-但在实际生产部署中，**实例数与线程分配策略对性能的影响同样关键**，
-其背后有深刻的 CPU 微架构原因，值得专项研究。
-
-#### x265 WPP 帧内同步屏障
-
-x265 在多线程模式下使用 **WPP（Wavefront Parallel Processing）**：
-帧被分为若干 CTU 行，多个线程以"波前"方式并行处理，
-但每行只能在上一行完成一定进度后才能启动，形成**帧内线程同步屏障**。
-
-```
-线程1:  ████████░░░░░░░  <- 线程2 必须等线程1 完成前 N 个 CTU 才能启动
-线程2:    ████████░░░░░
-线程3:      ████████░░░
-                    ↑ WPP barrier（同步等待点）
-```
-
-**直接后果**：
-- 多线程（如 `--threads 16`）时，后续线程大量时间在同步屏障处等待
-- 核心实际有效利用率通常只有 **50~65%**
-- 表现为"CPU% 看起来不高，但核心并没有在做有效工作"
-
-#### 解决思路：减少线程、增加实例
-
-**核心洞察**：与其让 1 个实例占用 16 个线程（存在大量同步等待），
-不如让 16 个实例各用 1 个线程，完全消除帧内 WPP 屏障。
-
-- 单线程实例：每个核心 100% 都在编码，消除帧内同步等待
-- 实例间完全独立：无共享数据结构，无锁竞争
-- 配合 numactl：每个实例绑定固定 NUMA 节点，消除跨 NUMA 内存访问延迟
-
-**多实例扩展测试的核心问题**：
-随着实例数增加（线程减少），总吞吐量和 CPU 利用率如何变化？
-什么样的实例/线程比最优？是否会触及内存带宽瓶颈？
-
----
-
-### 多实例扩展测试步骤
-
-#### 多实例扩展测试命令（五组对比实验）
-
-以下五条命令构成一组完整的多实例扩展对比实验，对应《EPYC 9755 多实例扩展对比报告》中的全部测试用例：
-
-```bash
-cd /workspace/chuadong/work/benchmark/ffmpeg-membw-bench
-OUTBASE=$(pwd)/results/scaling_$(date +%m%d)
-
-# 1. x265 medium 32×8t（基准）
-bash 03_run_membw_bench.sh --group B --instances 32 --threads 8 \
-    --duration 60 --output-dir ${OUTBASE}/32x8t
-
-# 2. x265 medium 64×4t
-bash 03_run_membw_bench.sh --group B --instances 64 --threads 4 \
-    --duration 60 --output-dir ${OUTBASE}/64x4t
-
-# 3. x265 medium 128×2t
-bash 03_run_membw_bench.sh --group B --instances 128 --threads 2 \
-    --duration 60 --output-dir ${OUTBASE}/128x2t
-
-# 4. x265 medium 256×1t（最优）
-bash 03_run_membw_bench.sh --group B --instances 256 --threads 1 \
-    --duration 60 --output-dir ${OUTBASE}/256x1t
-
-# 5. x265 ultrafast 256×1t（内存压测）
-bash 03_run_membw_bench.sh --group H --instances 256 --threads 1 \
-    --duration 60 --output-dir ${OUTBASE}/256x1t_ultrafast
-```
-
-跑完后生成 HTML 报告：
-
-```bash
-python3 06_generate_scaling_report.py \\
-    --results-dir ${OUTBASE} \\
-    --output ${OUTBASE}/scaling_report.html
-```
-
-汇总查看原始数据：
-
-```bash
-for cfg in 32x8t 64x4t 128x2t 256x1t; do
-  echo -n "${cfg}  "
-  jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
-    ${OUTBASE}/${cfg}/groupB_parallel_x265_medium/result.json 2>/dev/null || echo "NOT FOUND"
-done
-echo -n "256x1t_ultrafast  "
-jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
-  ${OUTBASE}/256x1t_ultrafast/groupH_parallel_x265_ultrafast/result.json 2>/dev/null || echo "NOT FOUND"
-```
-
-> **注意**：各组顺序执行，每组约 60-90s，全部完成约 **6-8 分钟**。  
-> 结果持久保存在 `results/scaling_MMDD/` 目录，服务器重启不丢失。
-
----
-
-以 EPYC 9755 2P（256 核，2 NUMA 节点，4K x265 medium，24ch DDR5-6400）为例，
-从 32 实例逐步扩展到 256 实例。
-
-#### 准备工作
-
-```bash
-cd /path/to/ffmpeg-membw-bench
-bash 00_prepare_input.sh      # 生成 4K 测试素材（重启后需重跑）
-```
-
-#### 第一档：32 实例 × 8 线程（基准）
-
-```bash
-screen -S bench_32inst -dm bash -c "
-  bash $(pwd)/03_run_membw_bench.sh \
-    --channels 24 \
-    --group B \
-    --instances 32 \
-    --threads 8 \
-    --duration 60 \
-    --output-dir /tmp/results/results_32inst \
-    > /tmp/bench_32inst.log 2>&1"
-tail -f /tmp/bench_32inst.log
-```
-
-#### 第二档：64 实例 × 4 线程
-
-```bash
-screen -S bench_64inst -dm bash -c "
-  bash $(pwd)/03_run_membw_bench.sh \
-    --channels 24 \
-    --group B \
-    --instances 64 \
-    --threads 4 \
-    --duration 60 \
-    --output-dir /tmp/results/results_64inst \
-    > /tmp/bench_64inst.log 2>&1"
-tail -f /tmp/bench_64inst.log
-```
-
-#### 第三档：128 实例 × 2 线程
-
-```bash
-screen -S bench_128inst -dm bash -c "
-  bash $(pwd)/03_run_membw_bench.sh \
-    --channels 24 \
-    --group B \
-    --instances 128 \
-    --threads 2 \
-    --duration 60 \
-    --output-dir /tmp/results/results_128inst \
-    > /tmp/bench_128inst.log 2>&1"
-tail -f /tmp/bench_128inst.log
-```
-
-#### 第四档：256 实例 × 1 线程（理论最优 CPU 利用率）
-
-```bash
-screen -S bench_256inst -dm bash -c "
-  bash $(pwd)/03_run_membw_bench.sh \
-    --channels 24 \
-    --group B \
-    --instances 256 \
-    --threads 1 \
-    --duration 60 \
-    --output-dir /tmp/results/results_256inst \
-    > /tmp/bench_256inst.log 2>&1"
-tail -f /tmp/bench_256inst.log
-```
-
-> **提示**：各组测试可依次运行，每组约 2-3 分钟。
-> 256 实例组因等待大量进程收集指标，实际耗时约 8-10 分钟。
-
-#### 汇总结果
-
-```bash
-for cfg in 32inst 64inst 128inst 256inst; do
-  echo -n "${cfg}  "
-  jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
-    /tmp/results/results_${cfg}/groupB_parallel_x265_medium/result.json \
-    2>/dev/null || echo "NOT FOUND"
-done
-# 示例输出（EPYC 9755 2P 实测）：
-# 32inst   16.00  512   51.4   5.93
-# 64inst   9.50   611   65.6   7.18
-# 128inst  5.70   729   82.8   8.48
-# 256inst  3.20   819   98.3   9.47
-```
-
----
-
-### ultrafast 预设内存压力测试
-
-x265 medium 是**计算密集型**，即使 CPU 满载，DRAM 带宽利用率仍然较低。
-**ultrafast 预设**禁用了大部分运动估计（ME）和帧间分析，
-使编码从"计算密集"转变为"内存读写密集"，是测试内存带宽极限的更合适负载。
-
-#### 为什么 ultrafast 能更好地压内存
-
-| 项目 | x265 medium | x265 ultrafast |
-|------|-------------|----------------|
-| 运动估计（ME） | 全搜索，极高计算量 | 禁用，几乎不做 |
-| 参考帧数 | ref=5（多帧） | ref=1（最少） |
-| 帧内预测 | 35 种模式 | 4 种模式 |
-| 主要瓶颈 | CPU 算术 | 内存读写 |
-| FPS（256×1t） | 3.2 fps/实例 | **7.65 fps/实例（实测）** |
-
-ultrafast 每帧编码的计算量减少约 5-8 倍，
-但读取参考帧的内存访问模式基本不变，
-因此内存带宽占比大幅提升，更接近"纯内存压力"测试。
-
-#### x265 ultrafast 预设原理说明
-
-x265 提供从 `ultrafast` 到 `veryslow` 共 10 档预设，控制编码速度和压缩质量的权衡。
-`ultrafast` 关闭了以下高计算量步骤（相比 `medium`）：
-
-| 步骤 | medium | ultrafast | 影响 |
-|------|--------|-----------|------|
-| 运动估计（ME）搜索算法 | hexbs/star 全搜索 | dia（最小菱形） | 计算量下降 60-70% |
-| 参考帧数（ref） | 5 帧 | 1 帧 | 减少跨帧内存读取 |
-| B帧预测 | 3 个 | 0 个 | 减少双向参考计算 |
-| 帧内预测模式数 | 35 种 | 4 种 | 减少候选计算 |
-| Rate-Distortion 优化级别 | rd=3 | rd=0 | 去掉 RD 迭代 |
-| 去方块滤镜（deblocking） | 开 | 关 | 省去滤波计算 |
-| SAO 滤波 | 开 | 关 | 省去 SAO 计算 |
-
-**结果**：每帧 CPU 算术量下降约 **5-8 倍**，FPS 从 medium 的 3.2 fps/实例 →
-ultrafast 的 7.65 fps/实例（+139%）。
-
-**为什么更接近内存带宽压测**：ME 是计算密集型（寄存器/L1 内计算，不频繁访问 DRAM），
-关闭 ME 后，编码器主要做熵编码和帧内 DCT 变换，这两步需要频繁读写当前帧缓冲区（DRAM），
-内存带宽（VFS rchar）从 medium 的 9.47 GB/s 提升到 ultrafast 的 22.90 GB/s，估算 DRAM 带宽约 183-229 GB/s，占峰值约 15-19%（medium 约 8%）。
-
-**代价**：码率约为 medium 的 **3-5 倍**（同画质），不适合生产归档，
-适合极低延迟推流或作为内存带宽基准测试。
-
-> Group H 正是基于上述原理设计：4K x265 ultrafast、256 实例 × 1 线程，
-> 是本工具集中最接近内存带宽受限的编码负载。
-
-#### 运行方法
-
-当前工具集 Group F（1080p ultrafast）可作参考，4K ultrafast 已通过 Group H 原生支持：
-
-```bash
-# 方法：直接用 Group B 参数，结合 --preset 选项（如脚本支持）
-# 或使用自定义 ffmpeg 命令行跑 256 实例：
-OUTDIR=/tmp/results/results_uf
-INPUT=/dev/shm/input_4k_10s.yuv
-mkdir -p ${OUTDIR}/groupUF_x265_ultrafast
-
-for ((i=0; i<256; i++)); do
-  NODE=$((i % 2))
-  numactl --cpunodebind=${NODE} --membind=${NODE} \
-    ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
-           -stream_loop -1 -i "${INPUT}" \
-           -t 60 \
-           -c:v libx265 -preset ultrafast \
-           -x265-params "pools=none" \
-           -threads 1 \
-           -f null - \
-           >> ${OUTDIR}/groupUF_x265_ultrafast/instance_${i}.log 2>&1 &
-done
-wait
-echo "Done"
-```
-
-#### 提取 FPS 结果
-
-```bash
-grep -h "encoded" /tmp/results/results_uf/groupUF_x265_ultrafast/instance_*.log \
-  | grep -oP "\(([0-9.]+) fps\)" \
-  | grep -oP "[0-9.]+" \
-  | awk '{sum+=$1; n++} END{printf "avg_fps=%.2f  total_fps=%.1f  instances=%d\n", sum/n, sum, n}'
-```
-
----
-
-### 实验结论与最优配置建议
-
-以下为 EPYC 9755 2P（256核）实测数据（4K，24ch DDR5-6400，60s）：
-
-| 配置 | 实例 | 线程/实例 | 总FPS | FPS/实例 | CPU利用率 | MemBW读(GB/s) |
-|------|------|-----------|-------|----------|-----------|---------------|
-| x265 medium 32×8t  | 32  | 8 | 512  | 16.0 | 51.4% | 5.93 |
-| x265 medium 64×4t  | 64  | 4 | 611  | 9.5  | 65.6% | 7.18 |
-| x265 medium 128×2t | 128 | 2 | 729  | 5.7  | 82.8% | 8.48 |
-| **x265 medium 256×1t** | **256** | **1** | **819** | 3.2 | **98.3%** | **9.47** |
-| x265 ultrafast 256×1t | 256 | 1 | **1960** | **7.65** | 97.3% | 22.90 GB/s |
-| **SVT-AV1 p10 256×1t** | **256** | **1** | **1972** | **7.70** | 95.8% | 23.05 GB/s |
-
-#### 数据解读
-
-**CPU 利用率趋势（51% → 98%）**：
-
-减少线程/实例消除了 WPP 帧内同步等待，CPU 真正在编码的时间大幅提升。
-256×1t 几乎达到硬件级 CPU 满载，是"让每个核心都有活干"的最优分配方式。
-
-**总 FPS 趋势（512 → 819，+60%）**：
-
-同等硬件，仅调整实例数/线程比，总吞吐量提升 60%。
-这部分增益完全来自消除 WPP 同步屏障，与内存带宽无关。
-
-**ultrafast vs medium（同为 256×1t）**：
-
-- FPS 提升 139%（1960 vs 819），吞吐量约 2.4 倍
-- ultrafast 禁用运动估计后，编码从"计算密集"转为"内存读写密集"
-- 即便如此，256 实例 ultrafast 实测 VFS rchar 22.90 GB/s，
-  估算 DRAM 带宽约 183-229 GB/s，仅为 24ch DDR5-6400 峰值（1228 GB/s）的 **15-19%**
-- 说明 x265 编码器远未触及内存带宽天花板
-
-**SVT-AV1 vs x265（同为 256×1t）**：
-
-- SVT-AV1 preset=10 总 FPS 1972，与 x265 ultrafast（1960）几乎相同
-- 但 AV1 压缩率比 H.265 高 20-30%——同等计算资源，AV1 输出码率更低
-- 内存占用 380 GB（高于 ultrafast 的 176 GB），AV1 参考帧结构更复杂
-- MemBW 23.05 GB/s（VFS），与 ultrafast 22.90 GB/s 基本持平
-- 实例间 FPS 分布极均匀（7.52～7.82），说明 numactl 绑定效果良好
-
-**内存带宽说明**：
-
-`membw_read_gbs` 为 VFS rchar 统计值（包含 tmpfs 层读取），
-实际 DRAM 带宽约为该值的 **8~10 倍**。
-要获取精确 DRAM 带宽，需使用硬件 PMC 计数器：
-
-```bash
-# 使用 perf 读取 DRAM 带宽（需 root 或 perf_event 权限）
-perf stat -e uncore_imc_0/cas_count_read/,uncore_imc_1/cas_count_read/ \
-  -a --timeout 10000 sleep 10
-```
-
-#### 工程配置建议
-
-| 场景 | 推荐配置 | 理由 |
-|------|----------|------|
-| 追求最高总吞吐（离线批量转码） | 实例数 = 核数，每实例 1 线程 | WPP 开销最小，CPU 利用率最高 |
-| 追求单路延迟最低（实时转码） | 1 实例 × N 线程 | 充分利用 WPP 帧内并行 |
-| 生产并发（兼顾利用率和延迟） | 实例数 = CCD 数 × 2，每实例 4 线程 | 平衡方案，无过度碎片化 |
-| 内存带宽压测 | ultrafast + 实例数 = 核数 × 1t | 减少计算占比，更接近纯内存压力 |
-
-
----
-
-## 版本历史
-
-| 版本 | 日期 | 主要变更 |
-|------|------|---------|
-| v1.1.1 | 2026-03-17 | 新增 Group H（4K x265 ultrafast，内存带宽压测）、README 扩展测试组说明至 A-H |
-| v1.1.2 | 2026-03-17 | 新增 Group I（4K SVT-AV1 preset=10，AV1 编码基准）；实测数据：1972 fps，95.8% CPU，380 GB 内存 |
-| v1.1.0 | 2026-03-16 | CCD/threads 自动探测、`--target-fps`、CPU/MEM 采样、NUMA round-robin |
-| v1.0.0 | 2025-06-04 | 初始版本，A-G 测试组，24ch 基准数据 |
+| 报告类型         | 地址                                                        |
+|------------------|-------------------------------------------------------------|
+| 单通道综合报告   | http://localhost:8085/results/24ch_TIMESTAMP/report.html    |
+| 跨通道对比报告   | http://localhost:8085/results/multi_channel_comparison.html |

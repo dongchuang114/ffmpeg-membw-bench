@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FFmpeg Memory BW - Multi-Channel Comparison</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+h1, h2, h3 { color: #e6edf3; }
+h1 { font-size: 1.8em; margin-bottom: 0.3em; }
+h2 { font-size: 1.3em; margin: 1.5em 0 0.5em; border-bottom: 1px solid #30363d; padding-bottom: 0.3em; }
+h3 { font-size: 1.1em; margin: 1em 0 0.4em; color: #79c0ff; }
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.header {
+  background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
+  border-bottom: 1px solid #30363d;
+  padding: 24px 0;
+  margin-bottom: 24px;
+}
+.header .container { display: flex; align-items: center; justify-content: space-between; }
+.badge {
+  background: #238636;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.badge.blue { background: #1f6feb; }
+.badge.orange { background: #d29922; }
+.nav {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  padding: 8px 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.nav ul { list-style: none; display: flex; gap: 4px; padding: 0 20px; }
+.nav li a {
+  display: block;
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: #8b949e;
+  transition: all 0.2s;
+}
+.nav li a:hover, .nav li a.active {
+  background: #21262d;
+  color: #c9d1d9;
+}
+.section { padding: 20px 0; display: block; margin-bottom: 32px; }
+.section.active { display: block; }
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.metric-card {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+.metric-card .value { font-size: 2em; font-weight: 700; color: #58a6ff; }
+.metric-card .label { color: #8b949e; font-size: 0.85em; margin-top: 4px; }
+.metric-card .unit { font-size: 0.6em; color: #8b949e; }
+table { width: 100%; border-collapse: collapse; }
+th { background: #21262d; color: #8b949e; padding: 8px 12px; text-align: left; font-weight: 600; font-size: 0.85em; }
+td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+tr:hover td { background: #161b22; }
+.chart-wrap { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+.chart-title { font-size: 1em; font-weight: 600; color: #e6edf3; margin-bottom: 12px; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.85em; cursor: pointer; }
+.legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+canvas { display: block; width: 100%; }
+.highlight { color: #3fb950; font-weight: 600; }
+.warn { color: #d29922; }
+footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color: #484f58; font-size: 0.85em; text-align: center; }
+/* Scenario card styles */
+.group-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-bottom:12px; }
+.group-header { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+.group-badge { display:inline-block; width:32px; height:32px; border-radius:50%; background:#1f6feb; color:#fff; font-weight:700; font-size:1.1em; text-align:center; line-height:32px; flex-shrink:0; }
+.scenario-name { font-size:1.05em; font-weight:600; color:#e6edf3; }
+.scenario-chars { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+.char-tag { background:#21262d; color:#79c0ff; padding:2px 8px; border-radius:4px; font-size:0.8em; }
+.pressure-row { display:flex; gap:8px; margin-bottom:10px; }
+.pbadge { padding:3px 10px; border-radius:10px; font-size:0.8em; font-weight:600; color:#fff; }
+.plevel-极低 { background:#1a6b3c; }
+.plevel-低   { background:#2ea043; }
+.plevel-中   { background:#9a6700; }
+.plevel-中等 { background:#9a6700; }
+.plevel-高   { background:#b45309; }
+.plevel-极高 { background:#b91c1c; }
+.expected-text { color:#8b949e; font-size:0.9em; margin-bottom:10px; }
+.result-row { display:flex; gap:20px; font-size:0.95em; }
+/* Scenario comparison table */
+.scenario-table th, .scenario-table td { padding:8px 10px; font-size:0.85em; }
+.drop-red { color:#ff7b72; font-weight:600; }
+.drop-yellow { color:#ffa657; font-weight:600; }
+.drop-green { color:#3fb950; font-weight:600; }
+.recommend-ok { color:#3fb950; }
+.recommend-warn { color:#ffa657; }
+.recommend-no { color:#ff7b72; }
+</style>
+</head>
+<body>
+<div class="header"><div class="container">
+  <div>
+    <h1>FFmpeg Memory Bandwidth - Channel Comparison</h1>
+    <div style="color:#8b949e;margin-top:4px;">AMD EPYC 9T24 (Genoa/Zen4) &bull; 3 configurations tested &bull; 2025-06-06 20:14:05</div>
+  </div>
+  <div><span class="badge orange">Multi-Channel</span></div>
+</div></div>
+<nav class="nav"><ul>
+  <li><a href="#" onclick="show('summary',this);return false;">Summary</a></li>
+  <li><a href="#" onclick="show('throughput',this);return false;">Throughput</a></li>
+  <li><a href="#" onclick="show('bandwidth',this);return false;">DRAM BW</a></li>
+  <li><a href="#" onclick="show('efficiency',this);return false;">Efficiency</a></li>
+  <li><a href="#" onclick="show('analysis',this);return false;">Key Findings</a></li>
+  <li><a href="#" onclick="show('scene-analysis',this);return false;">场景对比分析</a></li>
+  <li><a href="#" onclick="show('cpu-baseline',this);return false;">CPU能力参考</a></li>
+  <li><a href="#" onclick="show('recommendation',this);return false;">减配建议</a></li>
+</ul></nav>
+<div class="container">
+
+<section id="summary" class="section">
+<h2>Performance Summary</h2>
+<div class="card-grid">
+  <div class="metric-card"><div class="value">18</div><div class="unit">channels</div><div class="label">Best Configuration</div></div>
+  <div class="metric-card"><div class="value">676.0</div><div class="unit">FPS</div><div class="label">Peak Total Throughput</div></div>
+  <div class="metric-card"><div class="value">3</div><div class="unit">configs</div><div class="label">Tested Configurations</div></div>
+  <div class="metric-card"><div class="value">7.8</div><div class="unit">GB/s</div><div class="label">Peak Est. DRAM BW</div></div>
+</div>
+<div class="card"><h3>Complete Results Table</h3>
+<table><thead><tr><th>Channels</th><th>Single FPS (A)</th><th>Total FPS 38x (B)</th><th>Avg FPS/inst (B)</th><th>x264 Total (D)</th><th>Est. DRAM BW (GB/s)</th><th>FPS/Channel (B)</th></tr></thead><tbody><tr><td>12</td><td>0.0</td><td>126.1</td><td>3.31</td><td>0.0</td><td>1.46</td><td>10.51</td></tr><tr class="highlight"><td>18</td><td>0.0</td><td>676.0</td><td>1.76</td><td>0.0</td><td>7.83</td><td>37.56</td></tr><tr><td>24</td><td>0.0</td><td>676.0</td><td>1.76</td><td>0.0</td><td>7.83</td><td>28.17</td></tr></tbody></table></div>
+</section>
+
+<section id="throughput" class="section">
+<h2>Transcoding Throughput vs Memory Channels</h2>
+<div class="chart-wrap"><div class="chart-title">Total FPS - All Groups</div><div class="chart-legend" id="leg-fps"></div><canvas id="chart-fps"></canvas></div>
+<div class="chart-wrap"><div class="chart-title">Average FPS per Instance (Group B x265 medium)</div><div class="chart-legend" id="leg-fps-avg"></div><canvas id="chart-fps-avg"></canvas></div>
+</section>
+
+<section id="bandwidth" class="section">
+<h2>Estimated DRAM Bandwidth Utilization</h2>
+<div class="chart-wrap"><div class="chart-title">Estimated DRAM Read Bandwidth</div><div class="chart-legend" id="leg-bw"></div><canvas id="chart-bw"></canvas></div>
+<div class="card"><h3>Bandwidth Estimation Method</h3>
+<p>Each 4K YUV420p frame = 3840 x 2160 x 1.5 bytes = 11.9 MB</p>
+<p>Estimated DRAM Read (GB/s) = Total_FPS x 11.9 MB / 1024</p>
+<p style="color:#8b949e;margin-top:8px;">STREAM benchmark not yet run.</p>
+</div>
+</section>
+
+<section id="efficiency" class="section">
+<h2>Memory Channel Efficiency</h2>
+<div class="chart-wrap"><div class="chart-title">FPS per Memory Channel (Group B)</div><div class="chart-legend" id="leg-eff"></div><canvas id="chart-eff"></canvas></div>
+</section>
+
+<section id="analysis" class="section">
+<h2>Key Findings</h2>
+<div class="card"><h3>Best Configuration</h3>
+<p>Highest throughput at <span class="highlight">18 channels</span> with <span class="highlight">676.0 total FPS</span>.</p>
+</div>
+<div class="card"><h3>Channel Scaling</h3>
+<table><thead><tr><th>From</th><th>To</th><th>FPS Delta</th><th>Scaling</th></tr></thead><tbody><tr><td>12ch</td><td>18ch</td><td>+549.9</td><td>+435.9%</td></tr><tr><td>18ch</td><td>24ch</td><td>-0.1</td><td>-0.0%</td></tr></tbody></table></div>
+<div class="card"><h3>Methodology</h3>
+<ul style="padding-left:20px;line-height:2;">
+<li>Input: 4K (3840x2160) YUV420p 30fps from /dev/shm</li>
+<li>Encoder: libx265 preset medium, ref=5, bframes=3</li>
+<li>Parallelism: 38 instances (1 per CCD), each 1 threads, numactl bound</li>
+<li>NUMA: instances distributed round-robin across NUMA nodes</li>
+</ul></div>
+</section>
+
+<section id="scene-analysis" class="section">
+<h2>场景对比分析</h2>
+<div class="card">
+<h3>各组 FPS 汇总（通道数 x 场景）</h3>
+<table class="scenario-table"><thead><tr><th>组</th><th>场景</th><th>12ch</th><th>18ch</th><th>24ch</th><th>最大降幅</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>视频云 4K x265 medium</td><td>126.1</td><td>676.0</td><td>676.0</td><td class="drop-red">81.3%</td></tr></tbody></table></div>
+<div class="chart-wrap"><div class="chart-title">各场景 FPS 最大降幅（最高通道-最低通道）</div><div class="chart-legend" id="leg-drop"></div><canvas id="chart-drop"></canvas></div>
+</section>
+
+<section id="cpu-baseline" class="section">
+<h2>CPU能力参考（单路基准）</h2>
+<div class="card">
+<p>Group A 单实例基准（4K x265 medium，无内存竞争，numactl node0）：</p>
+<div style="display:flex;gap:32px;margin:12px 0;">
+<div class="metric-card" style="text-align:center;"><div class="value">0.0</div><div class="unit">FPS</div><div class="label">A组单实例（最高通道数）</div></div>
+<div class="metric-card" style="text-align:center;"><div class="value">0.0</div><div class="unit">FPS</div><div class="label">理论CPU峰值（x实例数）</div></div>
+</div>
+<p style="color:#8b949e;">理论CPU峰值代表无内存瓶颈时的编码上限。B组实测总FPS与此值的差距即为内存带宽瓶颈导致的损失。</p>
+</div>
+</section>
+
+<section id="recommendation" class="section">
+<h2>内存减配建议</h2>
+<table class="scenario-table"><thead><tr><th>组</th><th>场景</th><th>用途</th><th>12ch</th><th>18ch</th><th>24ch</th><th>结论</th></tr></thead><tbody><tr><td><strong>B</strong></td><td>视频云 4K x265 medium</td><td>核心参考</td><td class="drop-red">81.3%</td><td class="drop-green">0.0%</td><td class="drop-green">0.0%</td><td><span class="recommend-no">不建议减配</span></td></tr></tbody></table><div class="card" style="margin-top:16px;"><h3>结论</h3><ul style="padding-left:20px;line-height:2;"><li>B组降幅 81.3%，不建议减配</li></ul></div></section>
+
+</div>
+<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; 2025-06-06 20:14:05</div></footer>
+<script>
+
+function show(id, el) {
+  document.querySelectorAll('.section').forEach(function(s){ s.classList.remove('active'); });
+  document.querySelectorAll('.nav a').forEach(function(a){ a.classList.remove('active'); });
+  document.getElementById(id).classList.add('active');
+  if (el) el.classList.add('active');
+}
+
+
+var COLORS = ['#58a6ff','#3fb950','#d29922','#f78166','#bc8cff','#79c0ff','#56d364','#e3b341'];
+
+function drawBarChart(canvasId, legendId, labels, datasets, yLabel) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  canvas.width  = canvas.parentElement.clientWidth - 32;
+  canvas.height = 200;
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var PAD = {top:30, right:20, bottom:60, left:70};
+  var PW = W - PAD.left - PAD.right;
+  var PH = H - PAD.top  - PAD.bottom;
+
+  var maxVal = 0;
+  datasets.forEach(function(ds){ ds.data.forEach(function(v){ if(v > maxVal) maxVal = v; }); });
+  maxVal = maxVal * 1.15 || 1;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#161b22';
+  ctx.fillRect(0, 0, W, H);
+
+  var nGrid = 5;
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 1;
+  for (var gi = 0; gi <= nGrid; gi++) {
+    var y = PAD.top + PH - (PH * gi / nGrid);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + PW, y); ctx.stroke();
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText((maxVal * gi / nGrid).toFixed(1), PAD.left - 6, y + 4);
+  }
+
+  var nGroups = labels.length;
+  var nDS = datasets.length;
+  var groupW = PW / nGroups;
+  var barW = Math.min(groupW / (nDS + 1), 40);
+
+  for (var gi2 = 0; gi2 < nGroups; gi2++) {
+    for (var di = 0; di < nDS; di++) {
+      var val = datasets[di].data[gi2] || 0;
+      var bH = PH * val / maxVal;
+      var bX = PAD.left + gi2 * groupW + (di + 0.5) * barW + (groupW - nDS * barW) / 2;
+      var bY = PAD.top + PH - bH;
+      ctx.fillStyle = COLORS[di % COLORS.length];
+      ctx.fillRect(bX, bY, barW - 2, bH);
+    }
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(labels[gi2], PAD.left + gi2 * groupW + groupW / 2, H - PAD.bottom + 16);
+  }
+
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top + PH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top + PH); ctx.lineTo(PAD.left + PW, PAD.top + PH); ctx.stroke();
+
+  ctx.save(); ctx.translate(14, PAD.top + PH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(yLabel || '', 0, 0); ctx.restore();
+
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('Memory Channels', PAD.left + PW / 2, H - 8);
+
+  if (legendId) {
+    var leg = document.getElementById(legendId);
+    if (leg) {
+      leg.innerHTML = '';
+      datasets.forEach(function(ds, di2) {
+        var item = document.createElement('div');
+        item.className = 'legend-item';
+        item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[di2 % COLORS.length] + '"></div><span>' + ds.label + '</span>';
+        leg.appendChild(item);
+      });
+    }
+  }
+}
+
+function drawLineChart(canvasId, legendId, labels, datasets, yLabel) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  canvas.width  = canvas.parentElement.clientWidth - 32;
+  canvas.height = 180;
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var PAD = {top:30, right:20, bottom:60, left:70};
+  var PW = W - PAD.left - PAD.right;
+  var PH = H - PAD.top  - PAD.bottom;
+
+  var maxVal = 0, minVal = Infinity;
+  datasets.forEach(function(ds){
+    ds.data.forEach(function(v){ if(v > maxVal) maxVal = v; if(v < minVal) minVal = v; });
+  });
+  maxVal = maxVal * 1.1 || 1;
+  minVal = Math.max(0, minVal * 0.9);
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#161b22'; ctx.fillRect(0, 0, W, H);
+
+  var nGrid = 5;
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  for (var gi = 0; gi <= nGrid; gi++) {
+    var y = PAD.top + PH - (PH * gi / nGrid);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + PW, y); ctx.stroke();
+    var tickVal = minVal + (maxVal - minVal) * gi / nGrid;
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(tickVal.toFixed(1), PAD.left - 6, y + 4);
+  }
+
+  var nPts = labels.length;
+  function xPos(i) { return PAD.left + PW * i / Math.max(nPts - 1, 1); }
+  function yPos(v) { return PAD.top + PH - PH * (v - minVal) / (maxVal - minVal || 1); }
+
+  datasets.forEach(function(ds, di) {
+    var color = COLORS[di % COLORS.length];
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    if (ds.dashed) { ctx.setLineDash([8, 4]); } else { ctx.setLineDash([]); }
+    ctx.beginPath();
+    ds.data.forEach(function(v, i) {
+      var x = xPos(i), y = yPos(v);
+      if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ds.data.forEach(function(v, i) {
+      ctx.beginPath(); ctx.arc(xPos(i), yPos(v), 4, 0, 2*Math.PI); ctx.fill();
+    });
+  });
+
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top + PH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top + PH); ctx.lineTo(PAD.left + PW, PAD.top + PH); ctx.stroke();
+
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  labels.forEach(function(lbl, i) {
+    ctx.fillText(lbl, xPos(i), H - PAD.bottom + 16);
+  });
+
+  ctx.save(); ctx.translate(14, PAD.top + PH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(yLabel || '', 0, 0); ctx.restore();
+
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('Memory Channels', PAD.left + PW / 2, H - 8);
+
+  if (legendId) {
+    var leg = document.getElementById(legendId);
+    if (leg) {
+      leg.innerHTML = '';
+      datasets.forEach(function(ds, di2) {
+        var item = document.createElement('div');
+        item.className = 'legend-item';
+        item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[di2 % COLORS.length] + '"></div><span>' + ds.label + '</span>';
+        leg.appendChild(item);
+      });
+    }
+  }
+}
+
+window.onload = function() {
+  document.querySelector('.nav a').click();
+  var labels = ["12ch", "18ch", "24ch"];
+  drawLineChart('chart-fps', 'leg-fps', labels, [
+    {label:'Group A (single x265)', data:[0.0,0.0,0.0]},
+    {label:'Group B 4K x265 medium', data:[126.14,676.02,675.96]},
+    {label:'Group C 4K x265 slow', data:[0.0,0.0,0.0], dashed:true},
+    {label:'Group D 4K x264 medium', data:[0.0,0.0,0.0], dashed:true},
+    {label:'Group E decode', data:[0.0,0.0,0.0], dashed:true},
+    {label:'Group F 1080p ultrafast', data:[0.0,0.0,0.0], dashed:true},
+    {label:'Group G 4K slow ref=8', data:[0.0,0.0,0.0], dashed:true}
+  ], 'FPS');
+  drawLineChart('chart-fps-avg', 'leg-fps-avg', labels, [
+    {label:'Avg FPS/instance (B)', data:[3.31,1.76,1.76]}
+  ], 'FPS/instance');
+  drawBarChart('chart-bw', 'leg-bw', labels, [
+    {label:'Estimated DRAM Read (GB/s)', data:[1.46,7.83,7.83]}
+  ], 'GB/s');
+  drawBarChart('chart-eff', 'leg-eff', labels, [
+    {label:'FPS per Channel (B)', data:[10.51,37.56,28.17]}
+  ], 'FPS/ch');
+  drawBarChart('chart-drop', 'leg-drop', ["B", "C", "D", "E", "F", "G"],[{label:'FPS最大降幅(%)', data:[81.3,0.0,0.0,0.0,0.0,0.0]}],'降幅 %');
+};
+</script>
+</body>
+</html>
