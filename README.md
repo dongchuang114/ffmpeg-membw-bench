@@ -117,3 +117,17 @@
 |------------------|-------------------------------------------------------------|
 | 单通道综合报告   | http://localhost:8085/results/24ch_TIMESTAMP/report.html    |
 | 跨通道对比报告   | http://localhost:8085/results/multi_channel_comparison.html |
+
+
+---
+
+## 附录：多实例扩展分析（06_generate_scaling_report.py）
+
+此脚本分析「不同实例数 x 线程数组合」对总 FPS 的影响，与内存通道数无关。
+适用于回答「1 实例 256 线程 vs 256 实例 1 线程，哪个吞吐更高」此类扩展性问题。
+
+    python3 06_generate_scaling_report.py \
+        --results-dir /work/results/scaling_xxx \
+        --title "x265 实例扩展对比"
+
+输出：`--results-dir` 下的 `scaling_report.html`，包含 FPS/CPU/MemBW 图表及工程建议。
