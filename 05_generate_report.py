@@ -1,0 +1,701 @@
+#!/usr/bin/env python3
+"""
+FFmpeg 内存带宽基准测试报告生成器
+支持 per-channel 报告和多通道对比报告
+用法:
+  python3 05_generate_report.py --mode single --result-dir results/24ch_TIMESTAMP
+  python3 05_generate_report.py --mode multi  --results-dir results/
+"""
+import argparse
+import json
+import os
+import sys
+import glob
+import re
+from datetime import datetime
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description='Generate FFmpeg membw benchmark report')
+    p.add_argument('--mode', choices=['single', 'multi'], default='multi',
+                   help='single: one channel config; multi: compare multiple configs')
+    p.add_argument('--result-dir', default=None,
+                   help='Single mode: path to one channel result directory')
+    p.add_argument('--results-dir', default='/work/ffmpeg-membw-bench/results',
+                   help='Multi mode: root results directory')
+    p.add_argument('--output', default=None,
+                   help='Output HTML file path (default: auto-named)')
+    p.add_argument('--stream-peak', type=float, default=None,
+                   help='STREAM measured peak bandwidth (GB/s) for utilization calc')
+    return p.parse_args()
+
+
+def load_result_json(result_dir):
+    """Load all group result JSONs from a channel result directory."""
+    results = {}
+    meta_path = os.path.join(result_dir, 'meta.json')
+    if os.path.exists(meta_path):
+        with open(meta_path) as f:
+            results['meta'] = json.load(f)
+    for grp in ['A', 'B', 'C', 'D', 'E']:
+        for sub in ['group' + grp + '_single',
+                    'group' + grp + '_parallel_x265_medium',
+                    'group' + grp + '_parallel_x265_slow',
+                    'group' + grp + '_parallel_x264',
+                    'group' + grp + '_parallel_decode']:
+            rjson = os.path.join(result_dir, sub, 'result.json')
+            if os.path.exists(rjson):
+                with open(rjson) as f:
+                    data = json.load(f)
+                    results['group' + grp] = data
+    return results
+
+
+def collect_multi_results(results_dir):
+    """Collect all channel result directories, return sorted list.
+    For each channel count, only the LATEST directory (by timestamp in dirname) is used.
+    """
+    # 先收集每个 channel 的所有目录，按时间戳排序取最新
+    ch_map = {}  # ch -> list of (dirname, full_path)
+    for d in os.listdir(results_dir):
+        m = re.match(r'^(\d+)ch_', d)
+        if m:
+            ch = int(m.group(1))
+            full_path = os.path.join(results_dir, d)
+            if os.path.isdir(full_path):
+                ch_map.setdefault(ch, []).append((d, full_path))
+
+    dirs = []
+    for ch, entries in ch_map.items():
+        # 按目录名倒序排列，取第一个（最新时间戳）
+        entries.sort(key=lambda x: x[0], reverse=True)
+        latest_name, latest_path = entries[0]
+        if len(entries) > 1:
+            skipped = [e[0] for e in entries[1:]]
+            print(f'  {ch}ch: using {latest_name} (skipping older: {skipped})')
+        else:
+            print(f'  {ch}ch: using {latest_name}')
+        data = load_result_json(latest_path)
+        if data:
+            dirs.append({'channels': ch, 'dir': latest_path, 'data': data})
+
+    dirs.sort(key=lambda x: x['channels'])
+    return dirs
+
+
+# ─── CSS / JS constants ───────────────────────────────────────────────────────
+
+DARK_CSS = """
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  background: #0d1117;
+  color: #c9d1d9;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.6;
+}
+h1, h2, h3 { color: #e6edf3; }
+h1 { font-size: 1.8em; margin-bottom: 0.3em; }
+h2 { font-size: 1.3em; margin: 1.5em 0 0.5em; border-bottom: 1px solid #30363d; padding-bottom: 0.3em; }
+h3 { font-size: 1.1em; margin: 1em 0 0.4em; color: #79c0ff; }
+a { color: #58a6ff; text-decoration: none; }
+a:hover { text-decoration: underline; }
+.container { max-width: 1200px; margin: 0 auto; padding: 20px; }
+.header {
+  background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
+  border-bottom: 1px solid #30363d;
+  padding: 24px 0;
+  margin-bottom: 24px;
+}
+.header .container { display: flex; align-items: center; justify-content: space-between; }
+.badge {
+  background: #238636;
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 0.8em;
+  font-weight: 600;
+}
+.badge.blue { background: #1f6feb; }
+.badge.orange { background: #d29922; }
+.nav {
+  background: #161b22;
+  border-bottom: 1px solid #30363d;
+  padding: 8px 0;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.nav ul { list-style: none; display: flex; gap: 4px; padding: 0 20px; }
+.nav li a {
+  display: block;
+  padding: 6px 14px;
+  border-radius: 6px;
+  color: #8b949e;
+  transition: all 0.2s;
+}
+.nav li a:hover, .nav li a.active {
+  background: #21262d;
+  color: #c9d1d9;
+}
+.section { padding: 20px 0; display: block; margin-bottom: 32px; }
+.section.active { display: block; }
+.card {
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.metric-card {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 8px;
+  padding: 16px;
+  text-align: center;
+}
+.metric-card .value { font-size: 2em; font-weight: 700; color: #58a6ff; }
+.metric-card .label { color: #8b949e; font-size: 0.85em; margin-top: 4px; }
+.metric-card .unit { font-size: 0.6em; color: #8b949e; }
+table { width: 100%; border-collapse: collapse; }
+th { background: #21262d; color: #8b949e; padding: 8px 12px; text-align: left; font-weight: 600; font-size: 0.85em; }
+td { padding: 8px 12px; border-bottom: 1px solid #21262d; }
+tr:hover td { background: #161b22; }
+.chart-wrap { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 20px; }
+.chart-title { font-size: 1em; font-weight: 600; color: #e6edf3; margin-bottom: 12px; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 12px; margin-bottom: 8px; }
+.legend-item { display: flex; align-items: center; gap: 6px; font-size: 0.85em; cursor: pointer; }
+.legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; }
+canvas { display: block; width: 100%; }
+.highlight { color: #3fb950; font-weight: 600; }
+.warn { color: #d29922; }
+footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color: #484f58; font-size: 0.85em; text-align: center; }
+"""
+
+NAV_JS = """
+function show(id, el) {
+  document.querySelectorAll('.section').forEach(function(s){ s.classList.remove('active'); });
+  document.querySelectorAll('.nav a').forEach(function(a){ a.classList.remove('active'); });
+  document.getElementById(id).classList.add('active');
+  if (el) el.classList.add('active');
+}
+"""
+
+CHART_JS = r"""
+var COLORS = ['#58a6ff','#3fb950','#d29922','#f78166','#bc8cff','#79c0ff','#56d364','#e3b341'];
+
+function drawBarChart(canvasId, legendId, labels, datasets, yLabel) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  canvas.width  = canvas.parentElement.clientWidth - 32;
+  canvas.height = 200;
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var PAD = {top:30, right:20, bottom:60, left:70};
+  var PW = W - PAD.left - PAD.right;
+  var PH = H - PAD.top  - PAD.bottom;
+
+  var maxVal = 0;
+  datasets.forEach(function(ds){ ds.data.forEach(function(v){ if(v > maxVal) maxVal = v; }); });
+  maxVal = maxVal * 1.15 || 1;
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#161b22';
+  ctx.fillRect(0, 0, W, H);
+
+  var nGrid = 5;
+  ctx.strokeStyle = '#21262d';
+  ctx.lineWidth = 1;
+  for (var gi = 0; gi <= nGrid; gi++) {
+    var y = PAD.top + PH - (PH * gi / nGrid);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + PW, y); ctx.stroke();
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText((maxVal * gi / nGrid).toFixed(1), PAD.left - 6, y + 4);
+  }
+
+  var nGroups = labels.length;
+  var nDS = datasets.length;
+  var groupW = PW / nGroups;
+  var barW = Math.min(groupW / (nDS + 1), 40);
+
+  for (var gi2 = 0; gi2 < nGroups; gi2++) {
+    for (var di = 0; di < nDS; di++) {
+      var val = datasets[di].data[gi2] || 0;
+      var bH = PH * val / maxVal;
+      var bX = PAD.left + gi2 * groupW + (di + 0.5) * barW + (groupW - nDS * barW) / 2;
+      var bY = PAD.top + PH - bH;
+      ctx.fillStyle = COLORS[di % COLORS.length];
+      ctx.fillRect(bX, bY, barW - 2, bH);
+    }
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(labels[gi2], PAD.left + gi2 * groupW + groupW / 2, H - PAD.bottom + 16);
+  }
+
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top + PH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top + PH); ctx.lineTo(PAD.left + PW, PAD.top + PH); ctx.stroke();
+
+  ctx.save(); ctx.translate(14, PAD.top + PH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(yLabel || '', 0, 0); ctx.restore();
+
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('Memory Channels', PAD.left + PW / 2, H - 8);
+
+  if (legendId) {
+    var leg = document.getElementById(legendId);
+    if (leg) {
+      leg.innerHTML = '';
+      datasets.forEach(function(ds, di2) {
+        var item = document.createElement('div');
+        item.className = 'legend-item';
+        item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[di2 % COLORS.length] + '"></div><span>' + ds.label + '</span>';
+        leg.appendChild(item);
+      });
+    }
+  }
+}
+
+function drawLineChart(canvasId, legendId, labels, datasets, yLabel) {
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) return;
+  canvas.width  = canvas.parentElement.clientWidth - 32;
+  canvas.height = 180;
+  var ctx = canvas.getContext('2d');
+  var W = canvas.width, H = canvas.height;
+  var PAD = {top:30, right:20, bottom:60, left:70};
+  var PW = W - PAD.left - PAD.right;
+  var PH = H - PAD.top  - PAD.bottom;
+
+  var maxVal = 0, minVal = Infinity;
+  datasets.forEach(function(ds){
+    ds.data.forEach(function(v){ if(v > maxVal) maxVal = v; if(v < minVal) minVal = v; });
+  });
+  maxVal = maxVal * 1.1 || 1;
+  minVal = Math.max(0, minVal * 0.9);
+
+  ctx.clearRect(0, 0, W, H);
+  ctx.fillStyle = '#161b22'; ctx.fillRect(0, 0, W, H);
+
+  var nGrid = 5;
+  ctx.strokeStyle = '#21262d'; ctx.lineWidth = 1;
+  for (var gi = 0; gi <= nGrid; gi++) {
+    var y = PAD.top + PH - (PH * gi / nGrid);
+    ctx.beginPath(); ctx.moveTo(PAD.left, y); ctx.lineTo(PAD.left + PW, y); ctx.stroke();
+    var tickVal = minVal + (maxVal - minVal) * gi / nGrid;
+    ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'right';
+    ctx.fillText(tickVal.toFixed(1), PAD.left - 6, y + 4);
+  }
+
+  var nPts = labels.length;
+  function xPos(i) { return PAD.left + PW * i / Math.max(nPts - 1, 1); }
+  function yPos(v) { return PAD.top + PH - PH * (v - minVal) / (maxVal - minVal || 1); }
+
+  datasets.forEach(function(ds, di) {
+    var color = COLORS[di % COLORS.length];
+    ctx.strokeStyle = color; ctx.lineWidth = 2;
+    if (ds.dashed) { ctx.setLineDash([8, 4]); } else { ctx.setLineDash([]); }
+    ctx.beginPath();
+    ds.data.forEach(function(v, i) {
+      var x = xPos(i), y = yPos(v);
+      if (i === 0) { ctx.moveTo(x, y); } else { ctx.lineTo(x, y); }
+    });
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ds.data.forEach(function(v, i) {
+      ctx.beginPath(); ctx.arc(xPos(i), yPos(v), 4, 0, 2*Math.PI); ctx.fill();
+    });
+  });
+
+  ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top); ctx.lineTo(PAD.left, PAD.top + PH); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(PAD.left, PAD.top + PH); ctx.lineTo(PAD.left + PW, PAD.top + PH); ctx.stroke();
+
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  labels.forEach(function(lbl, i) {
+    ctx.fillText(lbl, xPos(i), H - PAD.bottom + 16);
+  });
+
+  ctx.save(); ctx.translate(14, PAD.top + PH / 2); ctx.rotate(-Math.PI / 2);
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText(yLabel || '', 0, 0); ctx.restore();
+
+  ctx.fillStyle = '#8b949e'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center';
+  ctx.fillText('Memory Channels', PAD.left + PW / 2, H - 8);
+
+  if (legendId) {
+    var leg = document.getElementById(legendId);
+    if (leg) {
+      leg.innerHTML = '';
+      datasets.forEach(function(ds, di2) {
+        var item = document.createElement('div');
+        item.className = 'legend-item';
+        item.innerHTML = '<div class="legend-dot" style="background:' + COLORS[di2 % COLORS.length] + '"></div><span>' + ds.label + '</span>';
+        leg.appendChild(item);
+      });
+    }
+  }
+}
+"""
+
+
+def _grp_card(show_flag, inst, fps, label, extra=''):
+    """Helper to build optional group card HTML without backslash in f-string."""
+    if not show_flag:
+        return ''
+    return (
+        '<div class="card"><h3>Group ' + label + ': ' + str(inst) + 'x ' + extra + '</h3>'
+        '<p class="highlight">Total FPS: ' + str(round(fps, 2)) + '</p></div>'
+    )
+
+
+def build_single_report(result_dir, stream_peak=None):
+    """Generate HTML report for a single channel configuration."""
+    data = load_result_json(result_dir)
+    dirname = os.path.basename(result_dir)
+    m = re.match(r'^(\d+)ch_', dirname)
+    channels = int(m.group(1)) if m else '?'
+    meta = data.get('meta', {})
+    cpu_model = meta.get('cpu_model', 'AMD EPYC 9T24')
+    hostname  = meta.get('hostname', 'unknown')
+    kernel    = meta.get('kernel', 'unknown')
+    timestamp = meta.get('timestamp', datetime.now().strftime('%Y%m%d_%H%M%S'))
+    instances = meta.get('instances', 24)
+
+    grp_a = data.get('groupA', {})
+    grp_b = data.get('groupB', {})
+    grp_c = data.get('groupC', {})
+    grp_d = data.get('groupD', {})
+    grp_e = data.get('groupE', {})
+
+    fps_a     = float(grp_a.get('total_fps', 0))
+    fps_b     = float(grp_b.get('total_fps', 0))
+    fps_b_avg = float(grp_b.get('avg_fps_per_instance', 0))
+    fps_c     = float(grp_c.get('total_fps', 0))
+    fps_d     = float(grp_d.get('total_fps', 0))
+    fps_e     = float(grp_e.get('total_fps', 0))
+
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    rows_html = ''
+    for grp_name, g, desc in [
+        ('A', grp_a, 'Single instance x265 medium'),
+        ('B', grp_b, str(instances) + 'x parallel x265 medium (ref=5)'),
+        ('C', grp_c, str(instances) + 'x parallel x265 slow'),
+        ('D', grp_d, str(instances) + 'x parallel x264 medium'),
+        ('E', grp_e, str(instances) + 'x parallel decode'),
+    ]:
+        if g:
+            rows_html += (
+                '<tr>'
+                '<td><span class="badge blue">Group ' + grp_name + '</span></td>'
+                '<td>' + desc + '</td>'
+                '<td>' + str(g.get('instances', '-')) + '</td>'
+                '<td class="highlight">' + str(round(float(g.get('total_fps', 0)), 1)) + '</td>'
+                '<td>' + str(round(float(g.get('avg_fps_per_instance', 0)), 2)) + '</td>'
+                '<td>' + str(g.get('duration_s', '-')) + 's</td>'
+                '</tr>'
+            )
+
+    # Optional group cards
+    card_c = _grp_card(bool(fps_c), instances, fps_c, 'C', 'x265 slow')
+    card_d = _grp_card(bool(fps_d), instances, fps_d, 'D', 'x264 medium (reference)')
+    card_e = _grp_card(bool(fps_e), instances, fps_e, 'E', 'Decode')
+
+    # Compute DRAM estimates (avoid backslash in f-string by precomputing)
+    dram_per_inst = round(fps_b_avg * 11.86 * 2 / 1024, 1)
+    dram_total    = round(fps_b * 11.86 * 2 / 1024, 1)
+
+    html = (
+        '<!DOCTYPE html>\n'
+        '<html lang="zh-CN">\n'
+        '<head>\n'
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<title>FFmpeg Memory BW Bench - ' + str(channels) + 'ch</title>\n'
+        '<style>' + DARK_CSS + '</style>\n'
+        '</head>\n'
+        '<body>\n'
+        '<div class="header"><div class="container">\n'
+        '  <div>\n'
+        '    <h1>FFmpeg Memory Bandwidth Benchmark</h1>\n'
+        '    <div style="color:#8b949e;margin-top:4px;">' + cpu_model + ' &bull; ' + str(channels) + ' Memory Channels &bull; ' + hostname + ' &bull; ' + now_str + '</div>\n'
+        '  </div>\n'
+        '  <div><span class="badge">' + str(channels) + 'ch DDR5</span></div>\n'
+        '</div></div>\n'
+        '<nav class="nav"><ul>\n'
+        '  <li><a href="#" onclick="show(\'overview\',this);return false;">Overview</a></li>\n'
+        '  <li><a href="#" onclick="show(\'details\',this);return false;">Group Details</a></li>\n'
+        '  <li><a href="#" onclick="show(\'sysinfo\',this);return false;">System Info</a></li>\n'
+        '</ul></nav>\n'
+        '<div class="container">\n'
+        '\n'
+        '<section id="overview" class="section">\n'
+        '<h2>Performance Overview - ' + str(channels) + ' Channels</h2>\n'
+        '<div class="card-grid">\n'
+        '  <div class="metric-card"><div class="value">' + str(round(fps_a, 1)) + '</div><div class="unit">FPS</div><div class="label">Single Instance (A)</div></div>\n'
+        '  <div class="metric-card"><div class="value">' + str(round(fps_b, 1)) + '</div><div class="unit">FPS</div><div class="label">Total Throughput ' + str(instances) + 'x (B)</div></div>\n'
+        '  <div class="metric-card"><div class="value">' + str(round(fps_b_avg, 2)) + '</div><div class="unit">FPS/inst</div><div class="label">Avg per Instance (B)</div></div>\n'
+        '  <div class="metric-card"><div class="value">' + str(round(fps_d, 1)) + '</div><div class="unit">FPS</div><div class="label">x264 Total (D)</div></div>\n'
+        '</div>\n'
+        '<div class="card"><h3>Group Results Summary</h3>\n'
+        '<table><thead><tr>'
+        '<th>Group</th><th>Description</th><th>Instances</th>'
+        '<th>Total FPS</th><th>Avg FPS/inst</th><th>Duration</th>'
+        '</tr></thead><tbody>' + rows_html + '</tbody></table></div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="details" class="section">\n'
+        '<h2>Group Details</h2>\n'
+        '<div class="card"><h3>Group A: Single Instance Baseline</h3>\n'
+        '<p>1 FFmpeg process, numactl node0, x265 medium, ref=5, 16 threads</p>\n'
+        '<p class="highlight">Total FPS: ' + str(round(fps_a, 2)) + '</p>\n'
+        '<p style="color:#8b949e;margin-top:8px;">Single-process performance ceiling. CPU-bound; minimal DRAM pressure.</p>\n'
+        '</div>\n'
+        '<div class="card"><h3>Group B: ' + str(instances) + 'x Parallel x265 medium (Main Test)</h3>\n'
+        '<p>Memory bandwidth stress: ' + str(instances) + ' concurrent encodes, 16-thread each, 4K YUV input</p>\n'
+        '<p class="highlight">Total FPS: ' + str(round(fps_b, 2)) + ' &nbsp; Avg: ' + str(round(fps_b_avg, 2)) + ' FPS/inst</p>\n'
+        '<p style="color:#8b949e;margin-top:8px;">Est. DRAM read per inst: ~' + str(dram_per_inst) + ' GB/s &nbsp; Total: ~' + str(dram_total) + ' GB/s</p>\n'
+        '</div>\n'
+        + card_c + card_d + card_e +
+        '</section>\n'
+        '\n'
+        '<section id="sysinfo" class="section">\n'
+        '<h2>System Information</h2>\n'
+        '<div class="card"><table>\n'
+        '<tr><th>CPU Model</th><td>' + cpu_model + '</td></tr>\n'
+        '<tr><th>Hostname</th><td>' + hostname + '</td></tr>\n'
+        '<tr><th>Kernel</th><td>' + kernel + '</td></tr>\n'
+        '<tr><th>Memory Channels</th><td>' + str(channels) + '</td></tr>\n'
+        '<tr><th>Test Instances</th><td>' + str(instances) + '</td></tr>\n'
+        '<tr><th>FFmpeg</th><td>4.4.2 (libx264 + libx265 + libaom)</td></tr>\n'
+        '<tr><th>Report Generated</th><td>' + now_str + '</td></tr>\n'
+        '</table></div>\n'
+        '</section>\n'
+        '\n'
+        '</div>\n'
+        '<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 &bull; Generated ' + now_str + '</div></footer>\n'
+        '<script>\n' + NAV_JS + '\n' + CHART_JS + '\n'
+        'window.onload = function() { document.querySelector(\'.nav a\').click(); };\n'
+        '</script>\n'
+        '</body>\n'
+        '</html>\n'
+    )
+    return html
+
+
+def build_multi_report(all_results, stream_peak=None):
+    """Generate multi-channel comparison HTML report."""
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+    channels_list = [r['channels'] for r in all_results]
+    ch_labels     = [str(c) + 'ch' for c in channels_list]
+
+    fps_a_series  = [float(r['data'].get('groupA', {}).get('total_fps', 0)) for r in all_results]
+    fps_b_total   = [float(r['data'].get('groupB', {}).get('total_fps', 0)) for r in all_results]
+    fps_b_avg_lst = [float(r['data'].get('groupB', {}).get('avg_fps_per_instance', 0)) for r in all_results]
+    fps_c_total   = [float(r['data'].get('groupC', {}).get('total_fps', 0)) for r in all_results]
+    fps_d_total   = [float(r['data'].get('groupD', {}).get('total_fps', 0)) for r in all_results]
+
+    # 4K YUV420 frame size in MB
+    FRAME_MB = 3840 * 2160 * 1.5 / (1024 * 1024)
+    dram_bw   = [fps * FRAME_MB / 1024 for fps in fps_b_total]
+    efficiency = [fps / max(ch, 1) for fps, ch in zip(fps_b_total, channels_list)]
+
+    best_fps = max(fps_b_total) if fps_b_total else 0
+    best_idx = fps_b_total.index(best_fps) if fps_b_total else 0
+    best_ch  = channels_list[best_idx] if channels_list else '?'
+
+    # Build table rows
+    table_rows = ''
+    for r in all_results:
+        ch  = r['channels']
+        gA  = r['data'].get('groupA', {})
+        gB  = r['data'].get('groupB', {})
+        gD  = r['data'].get('groupD', {})
+        f_a  = float(gA.get('total_fps', 0))
+        f_b  = float(gB.get('total_fps', 0))
+        f_avg = float(gB.get('avg_fps_per_instance', 0))
+        f_d   = float(gD.get('total_fps', 0))
+        bw    = f_b * FRAME_MB / 1024
+        eff   = f_b / max(ch, 1)
+        hi    = ' class="highlight"' if ch == best_ch else ''
+        table_rows += (
+            '<tr' + hi + '>'
+            '<td>' + str(ch) + '</td>'
+            '<td>' + str(round(f_a, 1)) + '</td>'
+            '<td>' + str(round(f_b, 1)) + '</td>'
+            '<td>' + str(round(f_avg, 2)) + '</td>'
+            '<td>' + str(round(f_d, 1)) + '</td>'
+            '<td>' + str(round(bw, 2)) + '</td>'
+            '<td>' + str(round(eff, 2)) + '</td>'
+            '</tr>'
+        )
+
+    # Scaling table rows
+    scale_rows = ''
+    for i in range(len(fps_b_total) - 1):
+        delta = fps_b_total[i + 1] - fps_b_total[i]
+        pct   = fps_b_total[i + 1] / max(fps_b_total[i], 0.001) * 100 - 100
+        scale_rows += (
+            '<tr><td>' + ch_labels[i] + '</td>'
+            '<td>' + ch_labels[i + 1] + '</td>'
+            '<td>' + ('+' if delta >= 0 else '') + str(round(delta, 1)) + '</td>'
+            '<td>' + ('+' if pct >= 0 else '') + str(round(pct, 1)) + '%</td></tr>'
+        )
+
+    # JS arrays
+    def js_arr(lst):
+        return '[' + ','.join(str(round(v, 2)) for v in lst) + ']'
+
+    js_labels     = str(ch_labels).replace("'", '"')
+    inst_label    = str(all_results[0]['data'].get('groupB', {}).get('instances', 24)) if all_results else '24'
+    stream_note   = ('Peak STREAM bandwidth: ' + str(stream_peak) + ' GB/s') if stream_peak else 'STREAM benchmark not yet run.'
+    frame_mb_str  = str(round(FRAME_MB, 1))
+
+    html = (
+        '<!DOCTYPE html>\n'
+        '<html lang="zh-CN">\n'
+        '<head>\n'
+        '<meta charset="UTF-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        '<title>FFmpeg Memory BW - Multi-Channel Comparison</title>\n'
+        '<style>' + DARK_CSS + '</style>\n'
+        '</head>\n'
+        '<body>\n'
+        '<div class="header"><div class="container">\n'
+        '  <div>\n'
+        '    <h1>FFmpeg Memory Bandwidth - Channel Comparison</h1>\n'
+        '    <div style="color:#8b949e;margin-top:4px;">'
+        'AMD EPYC 9T24 (Genoa/Zen4) &bull; ' + str(len(all_results)) + ' configurations tested &bull; ' + now_str +
+        '</div>\n'
+        '  </div>\n'
+        '  <div><span class="badge orange">Multi-Channel</span></div>\n'
+        '</div></div>\n'
+        '<nav class="nav"><ul>\n'
+        '  <li><a href="#" onclick="#summary">Summary</a></li>\n'
+        '  <li><a href="#" onclick="#throughput">Throughput</a></li>\n'
+        '  <li><a href="#" onclick="#bandwidth">DRAM BW</a></li>\n'
+        '  <li><a href="#" onclick="#efficiency">Efficiency</a></li>\n'
+        '  <li><a href="#" onclick="#analysis">Analysis</a></li>\n'
+        '</ul></nav>\n'
+        '<div class="container">\n'
+        '\n'
+        '<section id="summary" class="section">\n'
+        '<h2>Performance Summary</h2>\n'
+        '<div class="card-grid">\n'
+        '  <div class="metric-card"><div class="value">' + str(best_ch) + '</div><div class="unit">channels</div><div class="label">Best Configuration</div></div>\n'
+        '  <div class="metric-card"><div class="value">' + str(round(best_fps, 1)) + '</div><div class="unit">FPS</div><div class="label">Peak Total Throughput</div></div>\n'
+        '  <div class="metric-card"><div class="value">' + str(len(channels_list)) + '</div><div class="unit">configs</div><div class="label">Tested Configurations</div></div>\n'
+        '  <div class="metric-card"><div class="value">' + str(round(max(dram_bw) if dram_bw else 0, 1)) + '</div><div class="unit">GB/s</div><div class="label">Peak Est. DRAM BW</div></div>\n'
+        '</div>\n'
+        '<div class="card"><h3>Complete Results Table</h3>\n'
+        '<table><thead><tr>'
+        '<th>Channels</th><th>Single FPS (A)</th><th>Total FPS ' + inst_label + 'x (B)</th>'
+        '<th>Avg FPS/inst (B)</th><th>x264 Total (D)</th><th>Est. DRAM BW (GB/s)</th><th>FPS/Channel (B)</th>'
+        '</tr></thead><tbody>' + table_rows + '</tbody></table></div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="throughput" class="section">\n'
+        '<h2>Transcoding Throughput vs Memory Channels</h2>\n'
+        '<div class="chart-wrap"><div class="chart-title">Total FPS - All Groups</div>'
+        '<div class="chart-legend" id="leg-fps"></div><canvas id="chart-fps"></canvas></div>\n'
+        '<div class="chart-wrap"><div class="chart-title">Average FPS per Instance (Group B x265 medium)</div>'
+        '<div class="chart-legend" id="leg-fps-avg"></div><canvas id="chart-fps-avg"></canvas></div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="bandwidth" class="section">\n'
+        '<h2>Estimated DRAM Bandwidth Utilization</h2>\n'
+        '<div class="chart-wrap"><div class="chart-title">Estimated DRAM Read Bandwidth</div>'
+        '<div class="chart-legend" id="leg-bw"></div><canvas id="chart-bw"></canvas></div>\n'
+        '<div class="card"><h3>Bandwidth Estimation Method</h3>\n'
+        '<p>Each 4K YUV420p frame = 3840 x 2160 x 1.5 bytes = ' + frame_mb_str + ' MB</p>\n'
+        '<p>Estimated DRAM Read (GB/s) = Total_FPS x ' + frame_mb_str + ' MB / 1024</p>\n'
+        '<p style="color:#8b949e;margin-top:8px;">' + stream_note + '</p>\n'
+        '</div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="efficiency" class="section">\n'
+        '<h2>Memory Channel Efficiency</h2>\n'
+        '<div class="chart-wrap"><div class="chart-title">FPS per Memory Channel (Group B)</div>'
+        '<div class="chart-legend" id="leg-eff"></div><canvas id="chart-eff"></canvas></div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="analysis" class="section">\n'
+        '<h2>Key Findings</h2>\n'
+        '<div class="card"><h3>Best Configuration</h3>\n'
+        '<p>Highest throughput at <span class="highlight">' + str(best_ch) + ' channels</span> '
+        'with <span class="highlight">' + str(round(best_fps, 1)) + ' total FPS</span>.</p>\n'
+        '</div>\n'
+        '<div class="card"><h3>Channel Scaling</h3>\n'
+        '<table><thead><tr><th>From</th><th>To</th><th>FPS Delta</th><th>Scaling</th></tr></thead>'
+        '<tbody>' + scale_rows + '</tbody></table></div>\n'
+        '<div class="card"><h3>Methodology</h3>\n'
+        '<ul style="padding-left:20px;line-height:2;">\n'
+        '<li>Input: 4K (3840x2160) YUV420p 30fps from /dev/shm</li>\n'
+        '<li>Encoder: libx265 preset medium, ref=5, bframes=3</li>\n'
+        '<li>Parallelism: ' + inst_label + ' instances (1 per CCD), each 16 threads, numactl bound</li>\n'
+        '<li>NUMA: half instances on node0, half on node1</li>\n'
+        '</ul></div>\n'
+        '</section>\n'
+        '\n'
+        '</div>\n'
+        '<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; ' + now_str + '</div></footer>\n'
+        '<script>\n' + NAV_JS + '\n' + CHART_JS + '\n'
+        'window.onload = function() {\n'
+        '  document.querySelector(\'.nav a\').click();\n'
+        '  var labels = ' + js_labels + ';\n'
+        '  drawLineChart(\'chart-fps\', \'leg-fps\', labels, [\n'
+        '    {label:\'Group A (single x265)\', data:' + js_arr(fps_a_series) + '},\n'
+        '    {label:\'Group B total ' + inst_label + 'x x265 medium\', data:' + js_arr(fps_b_total) + '},\n'
+        '    {label:\'Group C total ' + inst_label + 'x x265 slow\', data:' + js_arr(fps_c_total) + ', dashed:true},\n'
+        '    {label:\'Group D total ' + inst_label + 'x x264\', data:' + js_arr(fps_d_total) + ', dashed:true}\n'
+        '  ], \'FPS\');\n'
+        '  drawLineChart(\'chart-fps-avg\', \'leg-fps-avg\', labels, [\n'
+        '    {label:\'Avg FPS/instance (B)\', data:' + js_arr(fps_b_avg_lst) + '}\n'
+        '  ], \'FPS/instance\');\n'
+        '  drawBarChart(\'chart-bw\', \'leg-bw\', labels, [\n'
+        '    {label:\'Estimated DRAM Read (GB/s)\', data:' + js_arr(dram_bw) + '}\n'
+        '  ], \'GB/s\');\n'
+        '  drawBarChart(\'chart-eff\', \'leg-eff\', labels, [\n'
+        '    {label:\'FPS per Channel (B)\', data:' + js_arr(efficiency) + '}\n'
+        '  ], \'FPS/ch\');\n'
+        '};\n'
+        '</script>\n'
+        '</body>\n'
+        '</html>\n'
+    )
+    return html
+
+
+def main():
+    args = parse_args()
+
+    if args.mode == 'single':
+        if not args.result_dir:
+            print('ERROR: --result-dir required for single mode', file=sys.stderr)
+            sys.exit(1)
+        html = build_single_report(args.result_dir, args.stream_peak)
+        out = args.output or os.path.join(args.result_dir, 'report.html')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(html)
+        print('Report written: ' + out)
+
+    elif args.mode == 'multi':
+        results_dir = args.results_dir
+        all_results = collect_multi_results(results_dir)
+        if not all_results:
+            print('No channel result directories found in ' + results_dir, file=sys.stderr)
+            print('Expected format: results/Nch_TIMESTAMP/')
+            sys.exit(1)
+        print('Found ' + str(len(all_results)) + ' configurations: ' + str([r['channels'] for r in all_results]))
+        html = build_multi_report(all_results, args.stream_peak)
+        out = args.output or os.path.join(results_dir, 'multi_channel_comparison.html')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(html)
+        print('Comparison report written: ' + out)
+
+
+if __name__ == '__main__':
+    main()
