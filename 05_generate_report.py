@@ -27,7 +27,30 @@ def parse_args():
                    help='Output HTML file path (default: auto-named)')
     p.add_argument('--stream-peak', type=float, default=None,
                    help='STREAM measured peak bandwidth (GB/s) for utilization calc')
+    p.add_argument('--perf-baseline', default='',
+                   help='ffmpeg-performance-test-script 结果目录，用于提取单路CPU基准')
     return p.parse_args()
+
+
+def load_perf_baseline(baseline_dir):
+    """从 ffmpeg-performance-test-script 结果目录读取单路FPS基准"""
+    if not baseline_dir or not os.path.isdir(baseline_dir):
+        return {}
+    baseline = {}
+    csv_path = os.path.join(baseline_dir, 'speed_comparison.csv')
+    if os.path.exists(csv_path):
+        import csv
+        with open(csv_path, 'r') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                key = (str(row.get('codec', '')) + '-' +
+                       str(row.get('preset', '')) + '-' +
+                       str(row.get('resolution', '')))
+                try:
+                    baseline[key] = float(row.get('avg_speed_x', 0))
+                except Exception:
+                    pass
+    return baseline
 
 
 def load_result_json(result_dir):
@@ -37,12 +60,18 @@ def load_result_json(result_dir):
     if os.path.exists(meta_path):
         with open(meta_path) as f:
             results['meta'] = json.load(f)
-    for grp in ['A', 'B', 'C', 'D', 'E']:
-        for sub in ['group' + grp + '_single',
-                    'group' + grp + '_parallel_x265_medium',
-                    'group' + grp + '_parallel_x265_slow',
-                    'group' + grp + '_parallel_x264',
-                    'group' + grp + '_parallel_decode']:
+    # Group subdirectory name patterns for A-G
+    GROUP_SUBS = {
+        'A': ['groupA_single'],
+        'B': ['groupB_parallel_x265_medium'],
+        'C': ['groupC_parallel_x265_slow'],
+        'D': ['groupD_parallel_x264'],
+        'E': ['groupE_parallel_decode'],
+        'F': ['groupF_parallel_1080p_ultrafast'],
+        'G': ['groupG_parallel_x265_slow_ref8'],
+    }
+    for grp, subs in GROUP_SUBS.items():
+        for sub in subs:
             rjson = os.path.join(result_dir, sub, 'result.json')
             if os.path.exists(rjson):
                 with open(rjson) as f:
@@ -171,6 +200,31 @@ canvas { display: block; width: 100%; }
 .highlight { color: #3fb950; font-weight: 600; }
 .warn { color: #d29922; }
 footer { margin-top: 40px; padding: 16px 0; border-top: 1px solid #30363d; color: #484f58; font-size: 0.85em; text-align: center; }
+/* Scenario card styles */
+.group-card { background:#161b22; border:1px solid #30363d; border-radius:8px; padding:16px; margin-bottom:12px; }
+.group-header { display:flex; align-items:center; gap:12px; margin-bottom:10px; }
+.group-badge { display:inline-block; width:32px; height:32px; border-radius:50%; background:#1f6feb; color:#fff; font-weight:700; font-size:1.1em; text-align:center; line-height:32px; flex-shrink:0; }
+.scenario-name { font-size:1.05em; font-weight:600; color:#e6edf3; }
+.scenario-chars { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+.char-tag { background:#21262d; color:#79c0ff; padding:2px 8px; border-radius:4px; font-size:0.8em; }
+.pressure-row { display:flex; gap:8px; margin-bottom:10px; }
+.pbadge { padding:3px 10px; border-radius:10px; font-size:0.8em; font-weight:600; color:#fff; }
+.plevel-极低 { background:#1a6b3c; }
+.plevel-低   { background:#2ea043; }
+.plevel-中   { background:#9a6700; }
+.plevel-中等 { background:#9a6700; }
+.plevel-高   { background:#b45309; }
+.plevel-极高 { background:#b91c1c; }
+.expected-text { color:#8b949e; font-size:0.9em; margin-bottom:10px; }
+.result-row { display:flex; gap:20px; font-size:0.95em; }
+/* Scenario comparison table */
+.scenario-table th, .scenario-table td { padding:8px 10px; font-size:0.85em; }
+.drop-red { color:#ff7b72; font-weight:600; }
+.drop-yellow { color:#ffa657; font-weight:600; }
+.drop-green { color:#3fb950; font-weight:600; }
+.recommend-ok { color:#3fb950; }
+.recommend-warn { color:#ffa657; }
+.recommend-no { color:#ff7b72; }
 """
 
 NAV_JS = """
@@ -351,6 +405,57 @@ def _grp_card(show_flag, inst, fps, label, extra=''):
     )
 
 
+def _pressure_level(level):
+    """Return CSS class name for a pressure level string."""
+    level = str(level).strip()
+    return 'plevel-' + level
+
+
+def _scenario_card(grp_letter, grp_data):
+    """Build a rich scenario card from group result JSON."""
+    if not grp_data:
+        return ''
+    scn = grp_data.get('scenario', {})
+    params = grp_data.get('params', {})
+    name = scn.get('name', 'Group ' + grp_letter)
+    chars = scn.get('characteristics', [])
+    cpu = scn.get('cpu_pressure', {})
+    mem = scn.get('memory_pressure', {})
+    expected = scn.get('expected', '')
+    total_fps = round(float(grp_data.get('total_fps', 0)), 2)
+    avg_fps = round(float(grp_data.get('avg_fps_per_instance', 0)), 2)
+    instances = grp_data.get('instances', '-')
+
+    cpu_level = cpu.get('level', '')
+    cpu_desc = cpu.get('desc', '')
+    mem_level = mem.get('level', '')
+    mem_desc = mem.get('desc', '')
+
+    chars_html = ''.join('<span class="char-tag">' + c + '</span>' for c in chars)
+    cpu_cls = _pressure_level(cpu_level)
+    mem_cls = _pressure_level(mem_level)
+
+    return (
+        '<div class="group-card">'
+        '<div class="group-header">'
+        '<span class="group-badge">' + grp_letter + '</span>'
+        '<span class="scenario-name">' + name + '</span>'
+        '</div>'
+        + ('<div class="scenario-chars">' + chars_html + '</div>' if chars_html else '') +
+        '<div class="pressure-row">'
+        '<span class="pbadge ' + cpu_cls + '">CPU: ' + cpu_level + '</span>'
+        '<span class="pbadge ' + mem_cls + '">内存: ' + mem_level + '</span>'
+        '</div>'
+        + ('<div class="expected-text">预期：' + expected + '</div>' if expected else '') +
+        '<div class="result-row">'
+        '<span>总FPS: <strong class="highlight">' + str(total_fps) + '</strong></span>'
+        '<span>均值: <strong>' + str(avg_fps) + '</strong> FPS/实例</span>'
+        '<span>实例数: ' + str(instances) + '</span>'
+        '</div>'
+        '</div>'
+    )
+
+
 def build_single_report(result_dir, stream_peak=None):
     """Generate HTML report for a single channel configuration."""
     data = load_result_json(result_dir)
@@ -369,6 +474,8 @@ def build_single_report(result_dir, stream_peak=None):
     grp_c = data.get('groupC', {})
     grp_d = data.get('groupD', {})
     grp_e = data.get('groupE', {})
+    grp_f = data.get('groupF', {})
+    grp_g = data.get('groupG', {})
 
     fps_a     = float(grp_a.get('total_fps', 0))
     fps_b     = float(grp_b.get('total_fps', 0))
@@ -376,6 +483,8 @@ def build_single_report(result_dir, stream_peak=None):
     fps_c     = float(grp_c.get('total_fps', 0))
     fps_d     = float(grp_d.get('total_fps', 0))
     fps_e     = float(grp_e.get('total_fps', 0))
+    fps_f     = float(grp_f.get('total_fps', 0))
+    fps_g     = float(grp_g.get('total_fps', 0))
 
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     rows_html = ''
@@ -385,6 +494,8 @@ def build_single_report(result_dir, stream_peak=None):
         ('C', grp_c, str(instances) + 'x parallel x265 slow'),
         ('D', grp_d, str(instances) + 'x parallel x264 medium'),
         ('E', grp_e, str(instances) + 'x parallel decode'),
+        ('F', grp_f, str(instances) + 'x parallel 1080p x265 ultrafast'),
+        ('G', grp_g, str(instances) + 'x parallel 4K x265 slow ref=8'),
     ]:
         if g:
             rows_html += (
@@ -398,10 +509,14 @@ def build_single_report(result_dir, stream_peak=None):
                 '</tr>'
             )
 
-    # Optional group cards
-    card_c = _grp_card(bool(fps_c), instances, fps_c, 'C', 'x265 slow')
-    card_d = _grp_card(bool(fps_d), instances, fps_d, 'D', 'x264 medium (reference)')
-    card_e = _grp_card(bool(fps_e), instances, fps_e, 'E', 'Decode')
+    # Scenario-aware cards for all groups
+    card_a = _scenario_card('A', grp_a)
+    card_b = _scenario_card('B', grp_b)
+    card_c = _scenario_card('C', grp_c)
+    card_d = _scenario_card('D', grp_d)
+    card_e = _scenario_card('E', grp_e)
+    card_f = _scenario_card('F', grp_f)
+    card_g = _scenario_card('G', grp_g)
 
     # Compute DRAM estimates (avoid backslash in f-string by precomputing)
     dram_per_inst = round(fps_b_avg * 11.86 * 2 / 1024, 1)
@@ -448,17 +563,7 @@ def build_single_report(result_dir, stream_peak=None):
         '\n'
         '<section id="details" class="section">\n'
         '<h2>Group Details</h2>\n'
-        '<div class="card"><h3>Group A: Single Instance Baseline</h3>\n'
-        '<p>1 FFmpeg process, numactl node0, x265 medium, ref=5, 16 threads</p>\n'
-        '<p class="highlight">Total FPS: ' + str(round(fps_a, 2)) + '</p>\n'
-        '<p style="color:#8b949e;margin-top:8px;">Single-process performance ceiling. CPU-bound; minimal DRAM pressure.</p>\n'
-        '</div>\n'
-        '<div class="card"><h3>Group B: ' + str(instances) + 'x Parallel x265 medium (Main Test)</h3>\n'
-        '<p>Memory bandwidth stress: ' + str(instances) + ' concurrent encodes, 16-thread each, 4K YUV input</p>\n'
-        '<p class="highlight">Total FPS: ' + str(round(fps_b, 2)) + ' &nbsp; Avg: ' + str(round(fps_b_avg, 2)) + ' FPS/inst</p>\n'
-        '<p style="color:#8b949e;margin-top:8px;">Est. DRAM read per inst: ~' + str(dram_per_inst) + ' GB/s &nbsp; Total: ~' + str(dram_total) + ' GB/s</p>\n'
-        '</div>\n'
-        + card_c + card_d + card_e +
+        + card_a + card_b + card_c + card_d + card_e + card_f + card_g +
         '</section>\n'
         '\n'
         '<section id="sysinfo" class="section">\n'
@@ -485,6 +590,143 @@ def build_single_report(result_dir, stream_peak=None):
     return html
 
 
+
+def _pct_drop(high_fps, low_fps):
+    """Compute percentage drop from high_fps to low_fps."""
+    if not high_fps or high_fps == 0:
+        return None
+    return round((high_fps - low_fps) / high_fps * 100, 1)
+
+
+def _drop_class(pct):
+    if pct is None:
+        return ''
+    if pct >= 20:
+        return 'drop-red'
+    if pct >= 5:
+        return 'drop-yellow'
+    return 'drop-green'
+
+
+def _build_scene_table(all_results, channels_list,
+                        fps_a, fps_b, fps_c, fps_d, fps_e, fps_f, fps_g):
+    """Build HTML table: groups B-G rows × channel columns."""
+    if not all_results:
+        return '<p style="color:#8b949e;">No data</p>'
+    groups = [
+        ('B', '视频云 4K x265 medium', fps_b),
+        ('C', '视频归档 4K x265 slow', fps_c),
+        ('D', 'x264 medium 对比', fps_d),
+        ('E', 'CDN解码 读密集', fps_e),
+        ('F', '直播 1080p ultrafast', fps_f),
+        ('G', '高质量归档 4K slow ref=8', fps_g),
+    ]
+    ch_headers = ''.join('<th>' + str(c) + 'ch</th>' for c in channels_list)
+    header = '<tr><th>组</th><th>场景</th>' + ch_headers + '<th>最大降幅</th></tr>'
+    rows = ''
+    for letter, name, series in groups:
+        valid = [v for v in series if v > 0]
+        if not valid:
+            continue
+        max_fps = max(valid)
+        min_fps = min(valid)
+        pct = _pct_drop(max_fps, min_fps)
+        cls = _drop_class(pct)
+        cells = ''
+        for v in series:
+            cells += '<td>' + (str(round(v, 1)) if v > 0 else '-') + '</td>'
+        pct_str = (str(pct) + '%') if pct is not None else '-'
+        rows += '<tr><td><strong>' + letter + '</strong></td><td>' + name + '</td>' + cells + '<td class="' + cls + '">' + pct_str + '</td></tr>'
+    if not rows:
+        return '<p style="color:#8b949e;">尚无多通道对比数据</p>'
+    return '<table class="scenario-table"><thead>' + header + '</thead><tbody>' + rows + '</tbody></table>'
+
+
+def _build_recommendation_table(all_results, channels_list,
+                                  fps_b, fps_c, fps_d, fps_e, fps_f, fps_g):
+    """Build recommendation table based on FPS drop thresholds."""
+    GROUPS = [
+        ('B', '视频云 4K x265 medium', fps_b, '核心参考'),
+        ('C', '视频归档 4K x265 slow', fps_c, '高质量压制'),
+        ('D', 'x264 medium', fps_d, '编码器对比'),
+        ('E', 'CDN解码', fps_e, '读密集'),
+        ('F', '直播 1080p ultrafast', fps_f, '低延迟推流'),
+        ('G', '高质量归档 slow ref=8', fps_g, '极限质量'),
+    ]
+    if not all_results or not channels_list:
+        return '<p style="color:#8b949e;">No data</p>'
+    max_ch = max(channels_list)
+    # Find FPS at max_ch for each group
+    try:
+        max_ch_idx = channels_list.index(max_ch)
+    except ValueError:
+        max_ch_idx = len(channels_list) - 1
+
+    ch_headers = ''.join('<th>' + str(c) + 'ch</th>' for c in channels_list)
+    header = ('<tr><th>组</th><th>场景</th><th>用途</th>' +
+              ch_headers + '<th>结论</th></tr>')
+    rows = ''
+    conclusions = []
+    for letter, name, series, purpose in GROUPS:
+        base = series[max_ch_idx] if max_ch_idx < len(series) else 0
+        if base == 0:
+            continue
+        cells = ''
+        worst_drop = 0.0
+        for v in series:
+            pct = _pct_drop(base, v) if v > 0 else None
+            cls = _drop_class(pct)
+            pct_str = ('+' if pct is not None and pct < 0 else '') + (str(abs(pct)) + '%' if pct is not None else '-')
+            cells += '<td class="' + cls + '">' + pct_str + '</td>'
+            if pct is not None and pct > worst_drop:
+                worst_drop = pct
+        if worst_drop >= 20:
+            conclusion = '<span class="recommend-no">不建议减配</span>'
+            conclusions.append(letter + '组降幅 ' + str(worst_drop) + '%，不建议减配')
+        elif worst_drop >= 5:
+            conclusion = '<span class="recommend-warn">谨慎减配</span>'
+            conclusions.append(letter + '组降幅 ' + str(worst_drop) + '%，谨慎减配')
+        else:
+            conclusion = '<span class="recommend-ok">可减配</span>'
+        rows += '<tr><td><strong>' + letter + '</strong></td><td>' + name + '</td><td>' + purpose + '</td>' + cells + '<td>' + conclusion + '</td></tr>'
+    if not rows:
+        return '<p style="color:#8b949e;">尚无多通道对比数据</p>'
+    conclusion_html = ''
+    if conclusions:
+        conclusion_html = ('<div class="card" style="margin-top:16px;">'
+                           '<h3>结论</h3><ul style="padding-left:20px;line-height:2;">' +
+                           ''.join('<li>' + c + '</li>' for c in conclusions) +
+                           '</ul></div>')
+    return ('<table class="scenario-table"><thead>' + header + '</thead><tbody>' +
+            rows + '</tbody></table>' + conclusion_html)
+
+
+def _build_drop_chart_js(fps_b, fps_c, fps_d, fps_e, fps_f, fps_g):
+    """Build JS snippet for the FPS drop bar chart (Section 4)."""
+    def max_drop(series):
+        valid = [v for v in series if v > 0]
+        if len(valid) < 2:
+            return 0.0
+        return round((max(valid) - min(valid)) / max(valid) * 100, 1)
+
+    drops = [
+        ('B', max_drop(fps_b)),
+        ('C', max_drop(fps_c)),
+        ('D', max_drop(fps_d)),
+        ('E', max_drop(fps_e)),
+        ('F', max_drop(fps_f)),
+        ('G', max_drop(fps_g)),
+    ]
+    labels = str([d[0] for d in drops]).replace("'", '"')
+    values = '[' + ','.join(str(d[1]) for d in drops) + ']'
+    chart_label = 'FPS最大降幅'
+    y_label = '降幅 %'
+    return (
+        "  drawBarChart('chart-drop', 'leg-drop', " + labels + ','
+        + "[{label:'" + chart_label + "(%)', data:" + values + "}],'" + y_label + "');\n"
+    )
+
+
 def build_multi_report(all_results, stream_peak=None):
     """Generate multi-channel comparison HTML report."""
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -497,6 +739,9 @@ def build_multi_report(all_results, stream_peak=None):
     fps_b_avg_lst = [float(r['data'].get('groupB', {}).get('avg_fps_per_instance', 0)) for r in all_results]
     fps_c_total   = [float(r['data'].get('groupC', {}).get('total_fps', 0)) for r in all_results]
     fps_d_total   = [float(r['data'].get('groupD', {}).get('total_fps', 0)) for r in all_results]
+    fps_e_total   = [float(r['data'].get('groupE', {}).get('total_fps', 0)) for r in all_results]
+    fps_f_total   = [float(r['data'].get('groupF', {}).get('total_fps', 0)) for r in all_results]
+    fps_g_total   = [float(r['data'].get('groupG', {}).get('total_fps', 0)) for r in all_results]
 
     # 4K YUV420 frame size in MB
     FRAME_MB = 3840 * 2160 * 1.5 / (1024 * 1024)
@@ -574,11 +819,14 @@ def build_multi_report(all_results, stream_peak=None):
         '  <div><span class="badge orange">Multi-Channel</span></div>\n'
         '</div></div>\n'
         '<nav class="nav"><ul>\n'
-        '  <li><a href="#" onclick="#summary">Summary</a></li>\n'
-        '  <li><a href="#" onclick="#throughput">Throughput</a></li>\n'
-        '  <li><a href="#" onclick="#bandwidth">DRAM BW</a></li>\n'
-        '  <li><a href="#" onclick="#efficiency">Efficiency</a></li>\n'
-        '  <li><a href="#" onclick="#analysis">Analysis</a></li>\n'
+        '  <li><a href="#" onclick="show(\'summary\',this);return false;">Summary</a></li>\n'
+        '  <li><a href="#" onclick="show(\'throughput\',this);return false;">Throughput</a></li>\n'
+        '  <li><a href="#" onclick="show(\'bandwidth\',this);return false;">DRAM BW</a></li>\n'
+        '  <li><a href="#" onclick="show(\'efficiency\',this);return false;">Efficiency</a></li>\n'
+        '  <li><a href="#" onclick="show(\'analysis\',this);return false;">Key Findings</a></li>\n'
+        '  <li><a href="#" onclick="show(\'scene-analysis\',this);return false;">场景对比分析</a></li>\n'
+        '  <li><a href="#" onclick="show(\'cpu-baseline\',this);return false;">CPU能力参考</a></li>\n'
+        '  <li><a href="#" onclick="show(\'recommendation\',this);return false;">减配建议</a></li>\n'
         '</ul></nav>\n'
         '<div class="container">\n'
         '\n'
@@ -640,6 +888,41 @@ def build_multi_report(all_results, stream_peak=None):
         '</ul></div>\n'
         '</section>\n'
         '\n'
+        '<section id="scene-analysis" class="section">\n'
+        '<h2>场景对比分析</h2>\n'
+        '<div class="card">\n'
+        '<h3>各组 FPS 汇总（通道数 × 场景）</h3>\n'
+        + _build_scene_table(all_results, channels_list, fps_a_series, fps_b_total, fps_c_total,
+                              fps_d_total, fps_e_total, fps_f_total, fps_g_total) +
+        '</div>\n'
+        '<div class="chart-wrap"><div class="chart-title">各场景 FPS 最大降幅（最高通道→最低通道）</div>'
+        '<div class="chart-legend" id="leg-drop"></div><canvas id="chart-drop"></canvas></div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="cpu-baseline" class="section">\n'
+        '<h2>CPU能力参考（单路基准）</h2>\n'
+        '<div class="card">\n'
+        '<p>Group A 单实例基准（4K x265 medium，无内存竞争，numactl node0）：</p>\n'
+        '<div style="display:flex;gap:32px;margin:12px 0;">\n'
+        '<div class="metric-card" style="text-align:center;">'
+        '<div class="value">' + str(round(fps_a_series[-1] if fps_a_series else 0, 1)) + '</div>'
+        '<div class="unit">FPS</div><div class="label">A组单实例（最高通道数）</div></div>\n'
+        '<div class="metric-card" style="text-align:center;">'
+        '<div class="value">' + str(round((fps_a_series[-1] if fps_a_series else 0) * (all_results[-1]['data'].get('groupB',{}).get('instances',24) if all_results else 24), 1)) + '</div>'
+        '<div class="unit">FPS</div><div class="label">理论CPU峰值（×实例数）</div></div>\n'
+        '</div>\n'
+        '<p style="color:#8b949e;">理论CPU峰值代表无内存瓶颈时的编码上限。'
+        'B组实测总FPS与此值的差距即为内存带宽瓶颈导致的损失。</p>\n'
+        '</div>\n'
+        '</section>\n'
+        '\n'
+        '<section id="recommendation" class="section">\n'
+        '<h2>内存减配建议</h2>\n'
+        + _build_recommendation_table(all_results, channels_list,
+                                       fps_b_total, fps_c_total, fps_d_total,
+                                       fps_e_total, fps_f_total, fps_g_total) +
+        '</section>\n'
+        '\n'
         '</div>\n'
         '<footer><div class="container">FFmpeg Memory Bandwidth Benchmark &bull; AMD EPYC 9T24 96-Core x2 &bull; ' + now_str + '</div></footer>\n'
         '<script>\n' + NAV_JS + '\n' + CHART_JS + '\n'
@@ -648,9 +931,12 @@ def build_multi_report(all_results, stream_peak=None):
         '  var labels = ' + js_labels + ';\n'
         '  drawLineChart(\'chart-fps\', \'leg-fps\', labels, [\n'
         '    {label:\'Group A (single x265)\', data:' + js_arr(fps_a_series) + '},\n'
-        '    {label:\'Group B total ' + inst_label + 'x x265 medium\', data:' + js_arr(fps_b_total) + '},\n'
-        '    {label:\'Group C total ' + inst_label + 'x x265 slow\', data:' + js_arr(fps_c_total) + ', dashed:true},\n'
-        '    {label:\'Group D total ' + inst_label + 'x x264\', data:' + js_arr(fps_d_total) + ', dashed:true}\n'
+        '    {label:\'Group B 4K x265 medium\', data:' + js_arr(fps_b_total) + '},\n'
+        '    {label:\'Group C 4K x265 slow\', data:' + js_arr(fps_c_total) + ', dashed:true},\n'
+        '    {label:\'Group D 4K x264 medium\', data:' + js_arr(fps_d_total) + ', dashed:true},\n'
+        '    {label:\'Group E decode\', data:' + js_arr(fps_e_total) + ', dashed:true},\n'
+        '    {label:\'Group F 1080p ultrafast\', data:' + js_arr(fps_f_total) + ', dashed:true},\n'
+        '    {label:\'Group G 4K slow ref=8\', data:' + js_arr(fps_g_total) + ', dashed:true}\n'
         '  ], \'FPS\');\n'
         '  drawLineChart(\'chart-fps-avg\', \'leg-fps-avg\', labels, [\n'
         '    {label:\'Avg FPS/instance (B)\', data:' + js_arr(fps_b_avg_lst) + '}\n'
@@ -661,6 +947,8 @@ def build_multi_report(all_results, stream_peak=None):
         '  drawBarChart(\'chart-eff\', \'leg-eff\', labels, [\n'
         '    {label:\'FPS per Channel (B)\', data:' + js_arr(efficiency) + '}\n'
         '  ], \'FPS/ch\');\n'
+        + _build_drop_chart_js(fps_b_total, fps_c_total, fps_d_total,
+                                fps_e_total, fps_f_total, fps_g_total) +
         '};\n'
         '</script>\n'
         '</body>\n'
@@ -690,6 +978,7 @@ def main():
             print('Expected format: results/Nch_TIMESTAMP/')
             sys.exit(1)
         print('Found ' + str(len(all_results)) + ' configurations: ' + str([r['channels'] for r in all_results]))
+        perf_baseline = load_perf_baseline(getattr(args, 'perf_baseline', ''))
         html = build_multi_report(all_results, args.stream_peak)
         out = args.output or os.path.join(results_dir, 'multi_channel_comparison.html')
         with open(out, 'w', encoding='utf-8') as f:
