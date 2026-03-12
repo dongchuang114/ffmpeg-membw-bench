@@ -626,7 +626,7 @@ if should_run G && ! should_skip G; then
                 -stream_loop -1 -i "$INPUT" \
                 -t "$DURATION" \
                 -c:v libx265 -preset slow \
-                -x265-params "ref=8:bframes=4:pools=none" \
+                -x265-params "ref=8:bframes=4:pools=none:allow-non-conformance=1" \
                 -threads 16 \
                 -f null - \
                 >> "${GDIR}/instance_${i}.log" 2>&1 &
