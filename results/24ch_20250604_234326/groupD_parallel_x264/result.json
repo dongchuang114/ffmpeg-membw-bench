@@ -1,0 +1,23 @@
+{
+  "group": "D",
+  "scenario": {
+    "name": "编码器横向对比（x264场景）",
+    "characteristics": ["4K分辨率", "x264 medium预设", "24路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "x264整数运算为主，SIMD更规律，CPU满载"},
+    "memory_pressure": {"level": "中", "desc": "访存模式更规律，DRAM带宽需求比x265低约30%"},
+    "expected": "x264更适合内存减配配置，降幅应小于B组"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx264",
+    "preset": "medium",
+    "x265_params": "",
+    "threads_per_instance": 16,
+    "instances": 24
+  },
+  "channels": 24,
+  "instances": 24,
+  "duration_s": 44,
+  "avg_fps_per_instance": 42.64,
+  "total_fps": 1023.40
+}

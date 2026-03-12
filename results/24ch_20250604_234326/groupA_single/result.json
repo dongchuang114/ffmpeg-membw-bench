@@ -1,0 +1,24 @@
+{
+  "group": "A",
+  "scenario": {
+    "name": "单实例基准（CPU上限参考）",
+    "characteristics": ["4K分辨率", "x265 medium预设", "ref=5 bframes=3", "单实例"],
+    "cpu_pressure": {"level": "低", "desc": "单实例仅用4%系统资源，CPU近乎空闲"},
+    "memory_pressure": {"level": "极低", "desc": "working set 75MB/实例，L3足够容纳"},
+    "expected": "用于计算理论峰值：A组FPS×24=满配CPU上限"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "medium",
+    "x265_params": "ref=5:bframes=3:pools=none",
+    "threads_per_instance": 16,
+    "instances": 1
+  },
+  "channels": 24,
+  "instances": 1,
+  "duration_s": 143,
+  "avg_fps_per_instance": 13.00,
+  "total_fps": 13.00,
+  "total_frames": 1800
+}

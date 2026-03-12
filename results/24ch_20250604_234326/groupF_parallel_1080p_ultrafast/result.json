@@ -1,0 +1,23 @@
+{
+  "group": "F",
+  "scenario": {
+    "name": "直播平台（低延迟推流）",
+    "characteristics": ["1080p分辨率", "ultrafast预设", "ref=1 bframes=0", "24路并发"],
+    "cpu_pressure": {"level": "中等", "desc": "ultrafast计算量低，约60% CPU利用率"},
+    "memory_pressure": {"level": "极低", "desc": "working set 9MB/实例 << L3 32MB，基本不访问DRAM"},
+    "expected": "内存通道数对此场景影响可忽略，可大幅减配"
+  },
+  "params": {
+    "resolution": "1920x1080",
+    "codec": "libx265",
+    "preset": "ultrafast",
+    "x265_params": "ref=1:bframes=0:pools=none",
+    "threads_per_instance": 16,
+    "instances": 24
+  },
+  "channels": 24,
+  "instances": 24,
+  "duration_s": 22,
+  "avg_fps_per_instance": 87.43,
+  "total_fps": 2098.40
+}

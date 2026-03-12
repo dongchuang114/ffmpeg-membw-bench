@@ -1,0 +1,23 @@
+{
+  "group": "E",
+  "scenario": {
+    "name": "CDN回源（纯解码读密集）",
+    "characteristics": ["4K H.265", "纯解码→null", "24路并发"],
+    "cpu_pressure": {"level": "中", "desc": "解码比编码轻，CPU利用率约50-70%"},
+    "memory_pressure": {"level": "极高", "desc": "纯顺序读，最接近STREAM理论峰值，最先达到带宽上限"},
+    "expected": "E组拐点=DRAM读带宽物理上限，为B/C组减配提供参考"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "ultrafast",
+    "x265_params": "decode_only",
+    "threads_per_instance": 16,
+    "instances": 24
+  },
+  "channels": 24,
+  "instances": 24,
+  "duration_s": 5,
+  "avg_fps_per_instance": 341.85,
+  "total_fps": 8204.60
+}

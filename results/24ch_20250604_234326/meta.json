@@ -1,0 +1,11 @@
+{
+  "channels": 24,
+  "duration_s": 60,
+  "instances": 24,
+  "timestamp": "20250604_234326",
+  "input": "/dev/shm/input_4k_10s.yuv",
+  "output_dir": "/work/ffmpeg-membw-bench/results/24ch_20250604_234326",
+  "hostname": "DeepSeek",
+  "kernel": "6.8.0-86-generic",
+  "cpu_model": "AMD EPYC 9T24 96-Core Processor"
+}

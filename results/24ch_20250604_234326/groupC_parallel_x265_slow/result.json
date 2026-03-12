@@ -1,0 +1,23 @@
+{
+  "group": "C",
+  "scenario": {
+    "name": "视频归档（标准质量压制）",
+    "characteristics": ["4K分辨率", "x265 slow预设", "ref=5 bframes=3", "24路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "slow预设计算量比medium高30%"},
+    "memory_pressure": {"level": "高", "desc": "搜索buffer更大，DRAM随机读增加30-50%"},
+    "expected": "比B组更早出现FPS拐点，带宽饱和点更高"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "slow",
+    "x265_params": "ref=5:bframes=3:pools=none",
+    "threads_per_instance": 16,
+    "instances": 24
+  },
+  "channels": 24,
+  "instances": 24,
+  "duration_s": 322,
+  "avg_fps_per_instance": 5.76,
+  "total_fps": 138.32
+}

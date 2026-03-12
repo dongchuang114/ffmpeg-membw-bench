@@ -1,0 +1,49 @@
+{
+  "group": "B",
+  "scenario": {
+    "name": "视频云（大量并发转码）",
+    "characteristics": ["4K分辨率", "x265 medium预设", "ref=5 bframes=3", "24路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "384线程系统满载~100%"},
+    "memory_pressure": {"level": "高", "desc": "1.8GB working set >> 768MB L3，强制DRAM"},
+    "expected": "核心对比组，FPS拐点即为建议最低通道数"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "medium",
+    "x265_params": "ref=5:bframes=3:pools=none",
+    "threads_per_instance": 16,
+    "instances": 24
+  },
+  "channels": 24,
+  "instances": 24,
+  "duration_s": 153,
+  "avg_fps_per_instance": 12.00,
+  "total_fps": 288.00,
+  "fps_per_instance": [
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00",
+  "12.00"
+]
+}

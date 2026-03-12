@@ -1,0 +1,23 @@
+{
+  "group": "G",
+  "scenario": {
+    "name": "视频归档（高质量压制）",
+    "characteristics": ["4K分辨率", "slow预设", "ref=8 bframes=4", "24路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "slow+ref=8计算量最大，CPU~100%"},
+    "memory_pressure": {"level": "极高", "desc": "working set ~100MB/实例 >> L3 32MB，DRAM压力超过C组"},
+    "expected": "内存带宽瓶颈最严重，减配影响最大，不建议减配"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "slow",
+    "x265_params": "ref=8:bframes=4:pools=none",
+    "threads_per_instance": 16,
+    "instances": 24
+  },
+  "channels": 24,
+  "instances": 24,
+  "duration_s": 341,
+  "avg_fps_per_instance": 5.43,
+  "total_fps": 130.54
+}
