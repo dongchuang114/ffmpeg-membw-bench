@@ -18,6 +18,11 @@ AMD EPYC 服务器 FFmpeg 内存带宽基准测试工具。
 - [脚本参数参考](#脚本参数参考)
 - [CCD 自动检测与实例数](#ccd-自动检测与实例数)
 - [目标 FPS 模式（反向资源查询）](#目标-fps-模式反向资源查询)
+- [多实例并发扩展测试（核心对比实验）](#多实例并发扩展测试核心对比实验)
+  - [为什么要做多实例扩展测试](#为什么要做多实例扩展测试)
+  - [多实例扩展测试步骤](#多实例扩展测试步骤)
+  - [ultrafast 预设内存压力测试](#ultrafast-预设内存压力测试)
+  - [实验结论与最优配置建议](#实验结论与最优配置建议)
 - [结果 JSON 字段说明（v1.1）](#结果-json-字段说明v11)
 - [输出目录结构](#输出目录结构)
 - [故障排除](#故障排除)
@@ -439,6 +444,45 @@ cat results/24ch_TIMESTAMP/groupB_parallel_x265_medium/result.json | python3 -m 
 }
 ```
 
+### 多档 FPS 扫描：反向查资源消耗曲线
+
+对比不同业务 FPS 档位下的 CPU / 内存消耗，找到"资源使用可接受"的最高 FPS 上限：
+
+```bash
+cd /path/to/ffmpeg-membw-bench
+
+# 依次测 4 / 8 / 12 / 16fps，每档结果存独立目录
+for fps in 4 8 12 16; do
+  echo "=== Testing target-fps=${fps} ==="
+  bash 03_run_membw_bench.sh \
+    --channels 24 \
+    --group B \
+    --target-fps ${fps} \
+    --duration 60 \
+    --output-dir /tmp/results_${fps}fps
+done
+```
+
+跑完后用 jq 汇总对比：
+
+```bash
+for fps in 4 8 12 16; do
+  echo -n "target_fps=${fps}  "
+  jq -r '[.target_fps, .avg_fps_per_instance, .avg_cpu_pct, .iowait_pct, .membw_read_gbs] | @tsv' \
+    /tmp/results_${fps}fps/groupB_parallel_x265_medium/result.json
+done
+# 输出示例：
+# target_fps=4   avg=3.99  cpu=18.2%  iowait=1.4%  bw=19.3GB/s
+# target_fps=8   avg=7.98  cpu=35.4%  iowait=3.1%  bw=38.7GB/s
+# target_fps=12  avg=11.96 cpu=52.8%  iowait=5.8%  bw=58.2GB/s
+# target_fps=16  avg=15.91 cpu=70.1%  iowait=9.3%  bw=77.6GB/s
+```
+
+**如何判断减配是否可行**：
+- `avg_cpu_pct` < 80% 且 `iowait_pct` 增幅平稳 → 内存带宽充足，可以减少通道数
+- `iowait_pct` 随 FPS 升高而急剧增大 → 内存带宽已成瓶颈，减配会使实际 FPS 低于目标
+- 找到 `avg_fps_per_instance` 明显低于 `target_fps` 的临界点 → 该点即为当前配置的 FPS 上限
+
 ---
 
 ## 结果 JSON 字段说明（v1.1）
@@ -553,6 +597,254 @@ lscpu | grep 'L3 cache'
 # 若探测失败，手动指定
 bash 03_run_membw_bench.sh --channels 24 --instances 24 --threads 16
 ```
+
+---
+
+## 多实例并发扩展测试（核心对比实验）
+
+### 为什么要做多实例扩展测试
+
+A-G 组测试固定了实例数（CCD 数量），聚焦于不同内存通道配置下的性能变化。
+但在实际生产部署中，**实例数与线程分配策略对性能的影响同样关键**，
+其背后有深刻的 CPU 微架构原因，值得专项研究。
+
+#### x265 WPP 帧内同步屏障
+
+x265 在多线程模式下使用 **WPP（Wavefront Parallel Processing）**：
+帧被分为若干 CTU 行，多个线程以"波前"方式并行处理，
+但每行只能在上一行完成一定进度后才能启动，形成**帧内线程同步屏障**。
+
+```
+线程1:  ████████░░░░░░░  <- 线程2 必须等线程1 完成前 N 个 CTU 才能启动
+线程2:    ████████░░░░░
+线程3:      ████████░░░
+                    ↑ WPP barrier（同步等待点）
+```
+
+**直接后果**：
+- 多线程（如 `--threads 16`）时，后续线程大量时间在同步屏障处等待
+- 核心实际有效利用率通常只有 **50~65%**
+- 表现为"CPU% 看起来不高，但核心并没有在做有效工作"
+
+#### 解决思路：减少线程、增加实例
+
+**核心洞察**：与其让 1 个实例占用 16 个线程（存在大量同步等待），
+不如让 16 个实例各用 1 个线程，完全消除帧内 WPP 屏障。
+
+- 单线程实例：每个核心 100% 都在编码，消除帧内同步等待
+- 实例间完全独立：无共享数据结构，无锁竞争
+- 配合 numactl：每个实例绑定固定 NUMA 节点，消除跨 NUMA 内存访问延迟
+
+**多实例扩展测试的核心问题**：
+随着实例数增加（线程减少），总吞吐量和 CPU 利用率如何变化？
+什么样的实例/线程比最优？是否会触及内存带宽瓶颈？
+
+---
+
+### 多实例扩展测试步骤
+
+以 EPYC 9755 2P（256 核，2 NUMA 节点，4K x265 medium，24ch DDR5-6400）为例，
+从 32 实例逐步扩展到 256 实例。
+
+#### 准备工作
+
+```bash
+cd /path/to/ffmpeg-membw-bench
+bash 00_prepare_input.sh      # 生成 4K 测试素材（重启后需重跑）
+```
+
+#### 第一档：32 实例 × 8 线程（基准）
+
+```bash
+screen -S bench_32inst -dm bash -c "
+  bash $(pwd)/03_run_membw_bench.sh \
+    --channels 24 \
+    --group B \
+    --instances 32 \
+    --threads 8 \
+    --duration 60 \
+    --output-dir /tmp/results/results_32inst \
+    > /tmp/bench_32inst.log 2>&1"
+tail -f /tmp/bench_32inst.log
+```
+
+#### 第二档：64 实例 × 4 线程
+
+```bash
+screen -S bench_64inst -dm bash -c "
+  bash $(pwd)/03_run_membw_bench.sh \
+    --channels 24 \
+    --group B \
+    --instances 64 \
+    --threads 4 \
+    --duration 60 \
+    --output-dir /tmp/results/results_64inst \
+    > /tmp/bench_64inst.log 2>&1"
+tail -f /tmp/bench_64inst.log
+```
+
+#### 第三档：128 实例 × 2 线程
+
+```bash
+screen -S bench_128inst -dm bash -c "
+  bash $(pwd)/03_run_membw_bench.sh \
+    --channels 24 \
+    --group B \
+    --instances 128 \
+    --threads 2 \
+    --duration 60 \
+    --output-dir /tmp/results/results_128inst \
+    > /tmp/bench_128inst.log 2>&1"
+tail -f /tmp/bench_128inst.log
+```
+
+#### 第四档：256 实例 × 1 线程（理论最优 CPU 利用率）
+
+```bash
+screen -S bench_256inst -dm bash -c "
+  bash $(pwd)/03_run_membw_bench.sh \
+    --channels 24 \
+    --group B \
+    --instances 256 \
+    --threads 1 \
+    --duration 60 \
+    --output-dir /tmp/results/results_256inst \
+    > /tmp/bench_256inst.log 2>&1"
+tail -f /tmp/bench_256inst.log
+```
+
+> **提示**：各组测试可依次运行，每组约 2-3 分钟。
+> 256 实例组因等待大量进程收集指标，实际耗时约 8-10 分钟。
+
+#### 汇总结果
+
+```bash
+for cfg in 32inst 64inst 128inst 256inst; do
+  echo -n "${cfg}  "
+  jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
+    /tmp/results/results_${cfg}/groupB_parallel_x265_medium/result.json \
+    2>/dev/null || echo "NOT FOUND"
+done
+# 示例输出（EPYC 9755 2P 实测）：
+# 32inst   16.00  512   51.4   5.93
+# 64inst   9.50   611   65.6   7.18
+# 128inst  5.70   729   82.8   8.48
+# 256inst  3.20   819   98.3   9.47
+```
+
+---
+
+### ultrafast 预设内存压力测试
+
+x265 medium 是**计算密集型**，即使 CPU 满载，DRAM 带宽利用率仍然较低。
+**ultrafast 预设**禁用了大部分运动估计（ME）和帧间分析，
+使编码从"计算密集"转变为"内存读写密集"，是测试内存带宽极限的更合适负载。
+
+#### 为什么 ultrafast 能更好地压内存
+
+| 项目 | x265 medium | x265 ultrafast |
+|------|-------------|----------------|
+| 运动估计（ME） | 全搜索，极高计算量 | 禁用，几乎不做 |
+| 参考帧数 | ref=5（多帧） | ref=1（最少） |
+| 帧内预测 | 35 种模式 | 4 种模式 |
+| 主要瓶颈 | CPU 算术 | 内存读写 |
+| FPS（256×1t） | 3.2 fps/实例 | **7.98 fps/实例** |
+
+ultrafast 每帧编码的计算量减少约 5-8 倍，
+但读取参考帧的内存访问模式基本不变，
+因此内存带宽占比大幅提升，更接近"纯内存压力"测试。
+
+#### 运行方法
+
+当前工具集 Group F（1080p ultrafast）可作参考，4K ultrafast 需手动指定参数：
+
+```bash
+# 方法：直接用 Group B 参数，结合 --preset 选项（如脚本支持）
+# 或使用自定义 ffmpeg 命令行跑 256 实例：
+OUTDIR=/tmp/results/results_uf
+INPUT=/dev/shm/input_4k_10s.yuv
+mkdir -p ${OUTDIR}/groupUF_x265_ultrafast
+
+for ((i=0; i<256; i++)); do
+  NODE=$((i % 2))
+  numactl --cpunodebind=${NODE} --membind=${NODE} \
+    ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+           -stream_loop -1 -i "${INPUT}" \
+           -t 60 \
+           -c:v libx265 -preset ultrafast \
+           -x265-params "pools=none" \
+           -threads 1 \
+           -f null - \
+           >> ${OUTDIR}/groupUF_x265_ultrafast/instance_${i}.log 2>&1 &
+done
+wait
+echo "Done"
+```
+
+#### 提取 FPS 结果
+
+```bash
+grep -h "encoded" /tmp/results/results_uf/groupUF_x265_ultrafast/instance_*.log \
+  | grep -oP "\(([0-9.]+) fps\)" \
+  | grep -oP "[0-9.]+" \
+  | awk '{sum+=$1; n++} END{printf "avg_fps=%.2f  total_fps=%.1f  instances=%d\n", sum/n, sum, n}'
+```
+
+---
+
+### 实验结论与最优配置建议
+
+以下为 EPYC 9755 2P（256核）实测数据（4K，24ch DDR5-6400，60s）：
+
+| 配置 | 实例 | 线程/实例 | 总FPS | FPS/实例 | CPU利用率 | MemBW读(GB/s) |
+|------|------|-----------|-------|----------|-----------|---------------|
+| x265 medium 32×8t  | 32  | 8 | 512  | 16.0 | 51.4% | 5.93 |
+| x265 medium 64×4t  | 64  | 4 | 611  | 9.5  | 65.6% | 7.18 |
+| x265 medium 128×2t | 128 | 2 | 729  | 5.7  | 82.8% | 8.48 |
+| **x265 medium 256×1t** | **256** | **1** | **819** | 3.2 | **98.3%** | **9.47** |
+| x265 ultrafast 256×1t | 256 | 1 | **2042** | **7.98** | ~98% | — |
+
+#### 数据解读
+
+**CPU 利用率趋势（51% → 98%）**：
+
+减少线程/实例消除了 WPP 帧内同步等待，CPU 真正在编码的时间大幅提升。
+256×1t 几乎达到硬件级 CPU 满载，是"让每个核心都有活干"的最优分配方式。
+
+**总 FPS 趋势（512 → 819，+60%）**：
+
+同等硬件，仅调整实例数/线程比，总吞吐量提升 60%。
+这部分增益完全来自消除 WPP 同步屏障，与内存带宽无关。
+
+**ultrafast vs medium（同为 256×1t）**：
+
+- FPS 提升 149%（2042 vs 819），吞吐量约 2.5 倍
+- ultrafast 禁用运动估计后，编码从"计算密集"转为"内存读写密集"
+- 即便如此，256 实例 ultrafast 估算 DRAM 带宽约 150 GB/s，
+  仍仅为 24ch DDR5-6400 峰值（1228 GB/s）的 **12%**
+- 说明 x265 编码器远未触及内存带宽天花板
+
+**内存带宽说明**：
+
+`membw_read_gbs` 为 VFS rchar 统计值（包含 tmpfs 层读取），
+实际 DRAM 带宽约为该值的 **8~10 倍**。
+要获取精确 DRAM 带宽，需使用硬件 PMC 计数器：
+
+```bash
+# 使用 perf 读取 DRAM 带宽（需 root 或 perf_event 权限）
+perf stat -e uncore_imc_0/cas_count_read/,uncore_imc_1/cas_count_read/ \
+  -a --timeout 10000 sleep 10
+```
+
+#### 工程配置建议
+
+| 场景 | 推荐配置 | 理由 |
+|------|----------|------|
+| 追求最高总吞吐（离线批量转码） | 实例数 = 核数，每实例 1 线程 | WPP 开销最小，CPU 利用率最高 |
+| 追求单路延迟最低（实时转码） | 1 实例 × N 线程 | 充分利用 WPP 帧内并行 |
+| 生产并发（兼顾利用率和延迟） | 实例数 = CCD 数 × 2，每实例 4 线程 | 平衡方案，无过度碎片化 |
+| 内存带宽压测 | ultrafast + 实例数 = 核数 × 1t | 减少计算占比，更接近纯内存压力 |
+
 
 ---
 
