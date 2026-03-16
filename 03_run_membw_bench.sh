@@ -23,7 +23,7 @@ THREADS=0            # 0 = 自动探测（nproc / ccd_count）
 THREADS_MANUAL=0
 TARGET_FPS=0         # 0 = 不限速
 INPUT=/dev/shm/input_4k_10s.yuv
-PROJ=/work/ffmpeg-membw-bench
+PROJ="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKIP_GROUPS=()
 OUTPUT_DIR=""
 
@@ -66,6 +66,7 @@ detect_numa_nodes() {
     local raw nodes=()
     raw=$(numactl --hardware 2>/dev/null \
           | grep '^available:' \
+          | grep -oP '(?<=\()[\d ,\-]+(?=\))' \
           | grep -oP '\d+-\d+|\d+' \
           | tr '\n' ' ')
     for token in $raw; do
