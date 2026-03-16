@@ -16,10 +16,31 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "timestamp_unix,timestamp_human,pid_count,total_read_MB_per_s,total_write_MB_per_s,avg_cpu_pct,total_rchar_MB" > "$OUTPUT"
+echo "timestamp_unix,timestamp_human,pid_count,total_read_MB_per_s,total_write_MB_per_s,avg_cpu_pct,iowait_pct,mem_used_gb,total_rchar_MB" > "$OUTPUT"
 
 PREV_RCHAR=0
 PREV_TIME=0
+PREV_CPU_TOTAL=0
+PREV_CPU_IDLE=0
+PREV_CPU_IOWAIT=0
+
+read_cpu_stat() {
+    awk '/^cpu /{
+        user=$2; nice=$3; sys=$4; idle=$5; iowait=$6
+        irq=$7; sirq=$8; steal=$9
+        busy  = user+nice+sys+irq+sirq+steal+iowait
+        total = busy + idle
+        print total " " idle " " iowait
+    }' /proc/stat
+}
+
+read_mem_used_gb() {
+    awk '
+        /^MemTotal:/     { total=$2 }
+        /^MemAvailable:/ { avail=$2 }
+        END { printf "%.2f", (total - avail) / 1048576 }
+    ' /proc/meminfo
+}
 
 cleanup() {
     echo "[collect_metrics] Stopped at $(date '+%F %T')"
@@ -72,9 +93,32 @@ while true; do
         READ_MBs=0
     fi
 
+    # CPU 利用率采样
+    CPU_STAT_NOW=$(read_cpu_stat)
+    CPU_TOTAL_NOW=$(echo "$CPU_STAT_NOW" | awk '{print $1}')
+    CPU_IDLE_NOW=$(echo "$CPU_STAT_NOW"  | awk '{print $2}')
+    CPU_IOWAIT_NOW=$(echo "$CPU_STAT_NOW" | awk '{print $3}')
+
+    if [ "$PREV_CPU_TOTAL" -gt 0 ] && [ "$CPU_TOTAL_NOW" -gt "$PREV_CPU_TOTAL" ]; then
+        DELTA_TOTAL=$((CPU_TOTAL_NOW - PREV_CPU_TOTAL))
+        DELTA_IDLE=$((CPU_IDLE_NOW   - PREV_CPU_IDLE))
+        DELTA_IOWAIT=$((CPU_IOWAIT_NOW - PREV_CPU_IOWAIT))
+        AVG_CPU_PCT=$(echo "scale=1; 100 * ($DELTA_TOTAL - $DELTA_IDLE) / $DELTA_TOTAL" | bc)
+        IOWAIT_PCT=$(echo "scale=1; 100 * $DELTA_IOWAIT / $DELTA_TOTAL" | bc)
+    else
+        AVG_CPU_PCT=0
+        IOWAIT_PCT=0
+    fi
+    PREV_CPU_TOTAL=$CPU_TOTAL_NOW
+    PREV_CPU_IDLE=$CPU_IDLE_NOW
+    PREV_CPU_IOWAIT=$CPU_IOWAIT_NOW
+
+    # 内存使用量采样
+    MEM_USED_GB=$(read_mem_used_gb)
+
     TOTAL_RCHAR_MB=$((TOTAL_RCHAR / 1048576))
 
-    echo "${NOW},${NOW_HR},${PID_COUNT},${READ_MBs},0,0,${TOTAL_RCHAR_MB}" >> "$OUTPUT"
+    echo "${NOW},${NOW_HR},${PID_COUNT},${READ_MBs},0,${AVG_CPU_PCT},${IOWAIT_PCT},${MEM_USED_GB},${TOTAL_RCHAR_MB}" >> "$OUTPUT"
 
     PREV_RCHAR=$TOTAL_RCHAR
     PREV_TIME=$NOW

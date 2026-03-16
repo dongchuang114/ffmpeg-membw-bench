@@ -15,6 +15,13 @@ import re
 from datetime import datetime
 
 
+def safe_float(val, default=0.0):
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
 def parse_args():
     p = argparse.ArgumentParser(description='Generate FFmpeg membw benchmark report')
     p.add_argument('--mode', choices=['single', 'multi'], default='multi',
@@ -426,6 +433,12 @@ def _scenario_card(grp_letter, grp_data):
     avg_fps = round(float(grp_data.get('avg_fps_per_instance', 0)), 2)
     instances = grp_data.get('instances', '-')
 
+    avg_cpu   = round(safe_float(grp_data.get('avg_cpu_pct',    0)), 1)
+    iowait    = round(safe_float(grp_data.get('iowait_pct',     0)), 1)
+    mem_gb    = round(safe_float(grp_data.get('mem_used_gb',    0)), 2)
+    bw_gbs    = round(safe_float(grp_data.get('membw_read_gbs', 0)), 2)
+    target_fps = grp_data.get('target_fps', 0)
+
     cpu_level = cpu.get('level', '')
     cpu_desc = cpu.get('desc', '')
     mem_level = mem.get('level', '')
@@ -434,6 +447,16 @@ def _scenario_card(grp_letter, grp_data):
     chars_html = ''.join('<span class="char-tag">' + c + '</span>' for c in chars)
     cpu_cls = _pressure_level(cpu_level)
     mem_cls = _pressure_level(mem_level)
+
+    extra_metrics = (
+        '<div class="result-row" style="margin-top:6px;color:#8b949e;font-size:0.85em;">'
+        '<span>CPU: <strong>' + str(avg_cpu) + '%</strong></span>'
+        '<span>iowait: <strong>' + str(iowait) + '%</strong></span>'
+        '<span>MEM: <strong>' + str(mem_gb) + ' GB</strong></span>'
+        '<span>BW: <strong>' + str(bw_gbs) + ' GB/s</strong></span>'
+        + ('<span>TargetFPS: <strong>' + str(target_fps) + '</strong></span>' if target_fps else '') +
+        '</div>'
+    )
 
     return (
         '<div class="group-card">'
@@ -452,6 +475,7 @@ def _scenario_card(grp_letter, grp_data):
         '<span>均值: <strong>' + str(avg_fps) + '</strong> FPS/实例</span>'
         '<span>实例数: ' + str(instances) + '</span>'
         '</div>'
+        + extra_metrics +
         '</div>'
     )
 
@@ -498,6 +522,10 @@ def build_single_report(result_dir, stream_peak=None):
         ('G', grp_g, str(instances) + 'x parallel 4K x265 slow ref=8'),
     ]:
         if g:
+            avg_cpu   = round(safe_float(g.get('avg_cpu_pct',    0)), 1)
+            iowait    = round(safe_float(g.get('iowait_pct',     0)), 1)
+            mem_gb    = round(safe_float(g.get('mem_used_gb',    0)), 2)
+            bw_gbs    = round(safe_float(g.get('membw_read_gbs', 0)), 2)
             rows_html += (
                 '<tr>'
                 '<td><span class="badge blue">Group ' + grp_name + '</span></td>'
@@ -506,6 +534,10 @@ def build_single_report(result_dir, stream_peak=None):
                 '<td class="highlight">' + str(round(float(g.get('total_fps', 0)), 1)) + '</td>'
                 '<td>' + str(round(float(g.get('avg_fps_per_instance', 0)), 2)) + '</td>'
                 '<td>' + str(g.get('duration_s', '-')) + 's</td>'
+                '<td>' + str(avg_cpu) + '%</td>'
+                '<td>' + str(iowait) + '%</td>'
+                '<td>' + str(mem_gb) + '</td>'
+                '<td>' + str(bw_gbs) + '</td>'
                 '</tr>'
             )
 
@@ -521,6 +553,18 @@ def build_single_report(result_dir, stream_peak=None):
     # Compute DRAM estimates (avoid backslash in f-string by precomputing)
     dram_per_inst = round(fps_b_avg * 11.86 * 2 / 1024, 1)
     dram_total    = round(fps_b * 11.86 * 2 / 1024, 1)
+
+    # System info extra rows
+    sysinfo_extra = (
+        '<tr><th>CCD Count</th><td>' + str(meta.get('ccd_count', '?')) + '</td></tr>\n'
+        '<tr><th>Threads/Instance</th><td>' + str(meta.get('threads_per_instance', '?')) +
+        ' (' + ('auto' if meta.get('threads_auto') else 'manual') + ')</td></tr>\n'
+        '<tr><th>Instances</th><td>' + str(meta.get('instances', '?')) +
+        ' (' + ('auto=CCD' if meta.get('instances_auto') else 'manual') + ')</td></tr>\n'
+        '<tr><th>Target FPS</th><td>' +
+        ('unlimited' if not meta.get('target_fps') else str(meta.get('target_fps')) + ' fps') +
+        '</td></tr>\n'
+    )
 
     html = (
         '<!DOCTYPE html>\n'
@@ -558,6 +602,7 @@ def build_single_report(result_dir, stream_peak=None):
         '<table><thead><tr>'
         '<th>Group</th><th>Description</th><th>Instances</th>'
         '<th>Total FPS</th><th>Avg FPS/inst</th><th>Duration</th>'
+        '<th>CPU%</th><th>iowait%</th><th>MEM GB</th><th>BW GB/s</th>'
         '</tr></thead><tbody>' + rows_html + '</tbody></table></div>\n'
         '</section>\n'
         '\n'
@@ -574,6 +619,7 @@ def build_single_report(result_dir, stream_peak=None):
         '<tr><th>Kernel</th><td>' + kernel + '</td></tr>\n'
         '<tr><th>Memory Channels</th><td>' + str(channels) + '</td></tr>\n'
         '<tr><th>Test Instances</th><td>' + str(instances) + '</td></tr>\n'
+        + sysinfo_extra +
         '<tr><th>FFmpeg</th><td>4.4.2 (libx264 + libx265 + libaom)</td></tr>\n'
         '<tr><th>Report Generated</th><td>' + now_str + '</td></tr>\n'
         '</table></div>\n'
@@ -610,7 +656,7 @@ def _drop_class(pct):
 
 def _build_scene_table(all_results, channels_list,
                         fps_a, fps_b, fps_c, fps_d, fps_e, fps_f, fps_g):
-    """Build HTML table: groups B-G rows × channel columns."""
+    """Build HTML table: groups B-G rows x channel columns."""
     if not all_results:
         return '<p style="color:#8b949e;">No data</p>'
     groups = [
@@ -883,19 +929,19 @@ def build_multi_report(all_results, stream_peak=None):
         '<ul style="padding-left:20px;line-height:2;">\n'
         '<li>Input: 4K (3840x2160) YUV420p 30fps from /dev/shm</li>\n'
         '<li>Encoder: libx265 preset medium, ref=5, bframes=3</li>\n'
-        '<li>Parallelism: ' + inst_label + ' instances (1 per CCD), each 16 threads, numactl bound</li>\n'
-        '<li>NUMA: half instances on node0, half on node1</li>\n'
+        '<li>Parallelism: ' + inst_label + ' instances (1 per CCD), each ' + str(all_results[0]['data'].get('meta', {}).get('threads_per_instance', 16) if all_results else 16) + ' threads, numactl bound</li>\n'
+        '<li>NUMA: instances distributed round-robin across NUMA nodes</li>\n'
         '</ul></div>\n'
         '</section>\n'
         '\n'
         '<section id="scene-analysis" class="section">\n'
         '<h2>场景对比分析</h2>\n'
         '<div class="card">\n'
-        '<h3>各组 FPS 汇总（通道数 × 场景）</h3>\n'
+        '<h3>各组 FPS 汇总（通道数 x 场景）</h3>\n'
         + _build_scene_table(all_results, channels_list, fps_a_series, fps_b_total, fps_c_total,
                               fps_d_total, fps_e_total, fps_f_total, fps_g_total) +
         '</div>\n'
-        '<div class="chart-wrap"><div class="chart-title">各场景 FPS 最大降幅（最高通道→最低通道）</div>'
+        '<div class="chart-wrap"><div class="chart-title">各场景 FPS 最大降幅（最高通道-最低通道）</div>'
         '<div class="chart-legend" id="leg-drop"></div><canvas id="chart-drop"></canvas></div>\n'
         '</section>\n'
         '\n'
@@ -909,7 +955,7 @@ def build_multi_report(all_results, stream_peak=None):
         '<div class="unit">FPS</div><div class="label">A组单实例（最高通道数）</div></div>\n'
         '<div class="metric-card" style="text-align:center;">'
         '<div class="value">' + str(round((fps_a_series[-1] if fps_a_series else 0) * (all_results[-1]['data'].get('groupB',{}).get('instances',24) if all_results else 24), 1)) + '</div>'
-        '<div class="unit">FPS</div><div class="label">理论CPU峰值（×实例数）</div></div>\n'
+        '<div class="unit">FPS</div><div class="label">理论CPU峰值（x实例数）</div></div>\n'
         '</div>\n'
         '<p style="color:#8b949e;">理论CPU峰值代表无内存瓶颈时的编码上限。'
         'B组实测总FPS与此值的差距即为内存带宽瓶颈导致的损失。</p>\n'
