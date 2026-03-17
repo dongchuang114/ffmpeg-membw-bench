@@ -83,6 +83,7 @@ SMT 关闭时自动减半，无需手动调整。
 | **F** | CCD数 | 1080p x265 ultrafast | **直播低延迟**：低分辨率低计算量，内存压力极低，可大幅减配 |
 | **G** | CCD数 | 4K x265 slow ref=8 | **高质量归档**：最大运动估计范围和参考帧，内存压力最大，不建议减配 |
 | **H** | CCD数 | 4K x265 ultrafast | **内存带宽压测**：禁用 ME 后以内存读写为主要瓶颈，FFmpeg 内最接近内存带宽受限的编码负载 |
+| **I** | CCD数 | 4K SVT-AV1 preset=10 | **AV1 编码基准**：下一代编解码，压缩率高于 H.265 约 20-30%，YouTube/Netflix 同类工作负载 |
 
 **如何看结果**：
 - A 组 FPS × 24 = 理论 CPU 峰值（无内存限制时）
@@ -835,6 +836,7 @@ grep -h "encoded" /tmp/results/results_uf/groupUF_x265_ultrafast/instance_*.log 
 | x265 medium 128×2t | 128 | 2 | 729  | 5.7  | 82.8% | 8.48 |
 | **x265 medium 256×1t** | **256** | **1** | **819** | 3.2 | **98.3%** | **9.47** |
 | x265 ultrafast 256×1t | 256 | 1 | **1960** | **7.65** | 97.3% | 22.90 GB/s |
+| **SVT-AV1 p10 256×1t** | **256** | **1** | **1972** | **7.70** | 95.8% | 23.05 GB/s |
 
 #### 数据解读
 
@@ -855,6 +857,14 @@ grep -h "encoded" /tmp/results/results_uf/groupUF_x265_ultrafast/instance_*.log 
 - 即便如此，256 实例 ultrafast 实测 VFS rchar 22.90 GB/s，
   估算 DRAM 带宽约 183-229 GB/s，仅为 24ch DDR5-6400 峰值（1228 GB/s）的 **15-19%**
 - 说明 x265 编码器远未触及内存带宽天花板
+
+**SVT-AV1 vs x265（同为 256×1t）**：
+
+- SVT-AV1 preset=10 总 FPS 1972，与 x265 ultrafast（1960）几乎相同
+- 但 AV1 压缩率比 H.265 高 20-30%——同等计算资源，AV1 输出码率更低
+- 内存占用 380 GB（高于 ultrafast 的 176 GB），AV1 参考帧结构更复杂
+- MemBW 23.05 GB/s（VFS），与 ultrafast 22.90 GB/s 基本持平
+- 实例间 FPS 分布极均匀（7.52～7.82），说明 numactl 绑定效果良好
 
 **内存带宽说明**：
 
@@ -885,5 +895,6 @@ perf stat -e uncore_imc_0/cas_count_read/,uncore_imc_1/cas_count_read/ \
 | 版本 | 日期 | 主要变更 |
 |------|------|---------|
 | v1.1.1 | 2026-03-17 | 新增 Group H（4K x265 ultrafast，内存带宽压测）、README 扩展测试组说明至 A-H |
+| v1.1.2 | 2026-03-17 | 新增 Group I（4K SVT-AV1 preset=10，AV1 编码基准）；实测数据：1972 fps，95.8% CPU，380 GB 内存 |
 | v1.1.0 | 2026-03-16 | CCD/threads 自动探测、`--target-fps`、CPU/MEM 采样、NUMA round-robin |
 | v1.0.0 | 2025-06-04 | 初始版本，A-G 测试组，24ch 基准数据 |
