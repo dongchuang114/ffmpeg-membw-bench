@@ -3,7 +3,7 @@
 # 用法: bash 03_run_membw_bench.sh [OPTIONS]
 #   --channels N      当前 BIOS 启用的内存通道数（用于结果标记，默认 24）
 #   --duration N      每组测试时长（秒，默认 60）
-#   --group A|B|C|D|E|F|G  只跑指定测试组（默认全部）
+#   --group A|B|C|D|E|F|G|H  只跑指定测试组（默认全部）
 #   --output-dir DIR  结果输出目录（默认 results/Nch_TIMESTAMP）
 #   --instances N     并行实例数（默认 0=自动探测 CCD 数）
 #   --threads N       每实例线程数（默认 0=自动探测 nproc/ccd_count）
@@ -886,6 +886,127 @@ if should_run G && ! should_skip G; then
 EOF
     log "[G] Done. Result: ${GDIR}/result.json"
 fi
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 H：INSTANCES 并行实例，4K x265 ultrafast（内存带宽压测）
+#
+# 背景：x265 ultrafast 预设禁用了大部分编码分析步骤，
+#       使编码器从"计算密集"转为"内存读写密集"，
+#       是 FFmpeg 框架内最接近内存带宽压测的工作负载。
+#
+# 与 x265 medium 对比（256实例 × 1线程实测）：
+#   medium  → 总 FPS 819，  CPU 98.3%，内存带宽 ~8% 峰值
+#   ultrafast → 总 FPS 2042，CPU ~98%，内存带宽 ~12% 峰值
+#
+# x265 ultrafast 关闭了哪些分析步骤（相比 medium）：
+#   - 运动估计（ME）：medium 做全搜索（hexbs/star），ultrafast 只做菱形（dia）且搜索范围极小
+#   - 参考帧数：medium ref=5，ultrafast ref=1（只看上一帧）
+#   - B帧预测：medium bframes=3，ultrafast bframes=0
+#   - 帧内模式数：medium 35种，ultrafast 4种
+#   - 去方块滤镜（deblocking）：ultrafast 关闭
+#   - SAO（Sample Adaptive Offset）：ultrafast 关闭
+#   - RD（Rate-Distortion）优化：ultrafast 0级，medium 3级
+# 上述步骤的关闭使每帧 CPU 算术量下降约 5-8 倍，
+# 帧率大幅提升，内存读写占总耗时的比例相应提高，
+# 更容易触及 DRAM 带宽瓶颈。
+#
+# 客户场景：极低延迟直播推流、内存带宽减配评估
+# CPU压力：高（~98%，但主要是简单算术）
+# 内存压力：高（内存带宽利用率约为 medium 的 1.5x）
+# ────────────────────────────────────────────────────────────────
+if should_run H && ! should_skip H; then
+    log_banner "H" "内存带宽压测（4K x265 ultrafast）" \
+        "极低延迟推流 / 内存带宽减配评估基准" \
+        "4K | x265 ultrafast | ref=1 bframes=0 | ${INSTANCES}路并发 | numactl绑定" \
+        "高" "ultrafast计算量仅为medium的1/5~1/8，但实例数多，CPU仍高负载" \
+        "高" "禁用ME后内存带宽占比提升，是FFmpeg内最接近内存带宽受限的编码负载" \
+        "对比B组：相同实例数下FPS约2.5x，内存带宽利用率约1.5x"
+    log "============================================"
+    log " Group H: ${INSTANCES} parallel 4K x265 ultrafast (membw stress)"
+    log "============================================"
+    HDIR="${OUTPUT_DIR}/groupH_parallel_x265_ultrafast"
+    mkdir -p "$HDIR"
+
+    log "[H] Launching ${INSTANCES} ffmpeg instances x265 ultrafast (${DURATION}s)..."
+    FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+    PIDS=()
+    for i in $(seq 0 $((INSTANCES - 1))); do
+        NODE=$(assign_numa_node "$i")
+        numactl --cpunodebind=${NODE} --membind=${NODE} \
+            ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                ${FPS_ARGS} \
+                -stream_loop -1 -i "$INPUT" \
+                -t "$DURATION" \
+                -c:v libx265 -preset ultrafast \
+                -x265-params "ref=1:bframes=0:pools=none" \
+                -threads ${THREADS} \
+                -f null - \
+                >> "${HDIR}/instance_${i}.log" 2>&1 &
+        PIDS+=($!)
+    done
+    log "[H] All instances launched. PIDs: ${PIDS[*]}"
+    log "[H] Waiting for completion..."
+
+    START_H=$(date +%s)
+    bash ${PROJ}/04_collect_metrics.sh \
+        --output "${HDIR}/bandwidth.csv" \
+        --interval 5 \
+        --pids "${PIDS[*]}" &
+    MONITOR_PID=$!
+
+    wait "${PIDS[@]}"
+    END_H=$(date +%s)
+    kill "$MONITOR_PID" 2>/dev/null || true
+    wait "$MONITOR_PID" 2>/dev/null || true
+    ELAPSED_H=$((END_H - START_H))
+    log "[H] All instances completed in ${ELAPSED_H}s"
+    summarize_metrics "${HDIR}/bandwidth.csv" "H"
+
+    TOTAL_FPS_H=0
+    FPS_LIST_H=()
+    for i in $(seq 0 $((INSTANCES - 1))); do
+        FPS_I=$(parse_fps "${HDIR}/instance_${i}.log")
+        FPS_LIST_H+=("$FPS_I")
+        TOTAL_FPS_H=$(echo "$TOTAL_FPS_H + ${FPS_I:-0}" | bc)
+    done
+    AVG_FPS_H=$(echo "scale=2; $TOTAL_FPS_H / $INSTANCES" | bc)
+    log "[H] Total FPS: ${TOTAL_FPS_H}, Avg per instance: ${AVG_FPS_H}"
+
+    FPS_JSON_H=$(printf '%s\n' "${FPS_LIST_H[@]}" | jq -R . | jq -s .)
+    cat > "${HDIR}/result.json" <<EOF
+{
+  "group": "H",
+  "scenario": {
+    "name": "内存带宽压测（4K x265 ultrafast）",
+    "characteristics": ["4K分辨率", "x265 ultrafast预设", "ref=1 bframes=0", "${INSTANCES}路并发"],
+    "cpu_pressure": {"level": "高", "desc": "ultrafast计算量约为medium的1/5~1/8，但多实例下CPU仍高负载"},
+    "memory_pressure": {"level": "高", "desc": "禁用ME后内存带宽占比提升，是FFmpeg内最接近内存带宽受限的编码负载"},
+    "expected": "对比B组：FPS约2.5x，内存带宽利用率约1.5x"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "ultrafast",
+    "x265_params": "ref=1:bframes=0:pools=none",
+    "threads_per_instance": ${THREADS},
+    "instances": ${INSTANCES}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INSTANCES},
+  "duration_s": ${ELAPSED_H},
+  "avg_fps_per_instance": ${AVG_FPS_H},
+  "total_fps": ${TOTAL_FPS_H},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[H_cpu]},
+  "iowait_pct": ${METRICS[H_iowait]},
+  "mem_used_gb": ${METRICS[H_mem]},
+  "membw_read_gbs": ${METRICS[H_bw]},
+  "fps_per_instance": ${FPS_JSON_H}
+}
+EOF
+    log "[H] Done. Result: ${HDIR}/result.json"
+fi
+
 
 # ── 汇总 ────────────────────────────────────────
 log "============================================"

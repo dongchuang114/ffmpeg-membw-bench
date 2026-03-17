@@ -71,7 +71,7 @@ CCD 数量 x 8核/CCD x 2线程(SMT) = 系统最大线程数
 每实例 `-threads` 数同样自动计算（`nproc ÷ CCD 数`），确保每实例恰好占满一个 CCD。
 SMT 关闭时自动减半，无需手动调整。
 
-### 五个测试组
+### 测试组说明（A-H）
 
 | 组 | 实例数 | 配置 | 测试目的 |
 |----|--------|------|----------|
@@ -80,6 +80,9 @@ SMT 关闭时自动减半，无需手动调整。
 | **C** | 24 | x265 slow | **高压力测试**：更大运动估计范围，更高内存带宽需求 |
 | **D** | 24 | x264 medium | **编码器对比**：x264 vs x265 对内存带宽的敏感度差异 |
 | **E** | 24 | 纯解码 | **读带宽极限**：纯读场景，找到 DRAM 读带宽饱和点 |
+| **F** | CCD数 | 1080p x265 ultrafast | **直播低延迟**：低分辨率低计算量，内存压力极低，可大幅减配 |
+| **G** | CCD数 | 4K x265 slow ref=8 | **高质量归档**：最大运动估计范围和参考帧，内存压力最大，不建议减配 |
+| **H** | CCD数 | 4K x265 ultrafast | **内存带宽压测**：禁用 ME 后以内存读写为主要瓶颈，FFmpeg 内最接近内存带宽受限的编码负载 |
 
 **如何看结果**：
 - A 组 FPS × 24 = 理论 CPU 峰值（无内存限制时）
@@ -196,7 +199,7 @@ screen -r bench24
 [23:59:13] [B] Total FPS: 288.00, Avg per instance: 12.00
 ```
 
-完整测试（A-G 全组 x 60s）约需 **8-10 分钟**。
+完整测试（A-H 全组 x 60s）约需 **10-12 分钟**。
 
 仅快速验证 A 组（2 分钟）：
 
@@ -311,7 +314,7 @@ free -h       # 确认总内存符合预期
 
 可选:
   --duration N        每组持续时间（秒），默认 60
-  --group X           只跑指定组（A/B/C/D/E/F/G），默认全部
+  --group X           只跑指定组（A/B/C/D/E/F/G/H），默认全部
   --instances N       手动指定并行实例数（默认：自动探测 CCD 数量）
   --threads N         手动指定每实例 ffmpeg 线程数（默认：自动，= 总vCPU ÷ CCD数）
   --target-fps N      目标 FPS 限速（0=不限速，默认 0）
@@ -540,6 +543,7 @@ ffmpeg-membw-bench/
     │   ├── groupE_parallel_decode/
     │   ├── groupF_parallel_1080p_ultrafast/
     │   ├── groupG_parallel_x265_slow_ref8/
+    │   ├── groupH_parallel_x265_ultrafast/
     │   ├── meta.json                   # 硬件/运行参数（含 ccd_count, threads_per_instance）
     │   └── report.html
     ├── 16ch_20250607_100000/
@@ -754,9 +758,37 @@ ultrafast 每帧编码的计算量减少约 5-8 倍，
 但读取参考帧的内存访问模式基本不变，
 因此内存带宽占比大幅提升，更接近"纯内存压力"测试。
 
+#### x265 ultrafast 预设原理说明
+
+x265 提供从 `ultrafast` 到 `veryslow` 共 10 档预设，控制编码速度和压缩质量的权衡。
+`ultrafast` 关闭了以下高计算量步骤（相比 `medium`）：
+
+| 步骤 | medium | ultrafast | 影响 |
+|------|--------|-----------|------|
+| 运动估计（ME）搜索算法 | hexbs/star 全搜索 | dia（最小菱形） | 计算量下降 60-70% |
+| 参考帧数（ref） | 5 帧 | 1 帧 | 减少跨帧内存读取 |
+| B帧预测 | 3 个 | 0 个 | 减少双向参考计算 |
+| 帧内预测模式数 | 35 种 | 4 种 | 减少候选计算 |
+| Rate-Distortion 优化级别 | rd=3 | rd=0 | 去掉 RD 迭代 |
+| 去方块滤镜（deblocking） | 开 | 关 | 省去滤波计算 |
+| SAO 滤波 | 开 | 关 | 省去 SAO 计算 |
+
+**结果**：每帧 CPU 算术量下降约 **5-8 倍**，FPS 从 medium 的 3.2 fps/实例 →
+ultrafast 的 7.98 fps/实例（+149%）。
+
+**为什么更接近内存带宽压测**：ME 是计算密集型（寄存器/L1 内计算，不频繁访问 DRAM），
+关闭 ME 后，编码器主要做熵编码和帧内 DCT 变换，这两步需要频繁读写当前帧缓冲区（DRAM），
+内存带宽占总耗时比例从 medium 的 ~8% 提升到 ultrafast 的 ~12%。
+
+**代价**：码率约为 medium 的 **3-5 倍**（同画质），不适合生产归档，
+适合极低延迟推流或作为内存带宽基准测试。
+
+> Group H 正是基于上述原理设计：4K x265 ultrafast、256 实例 × 1 线程，
+> 是本工具集中最接近内存带宽受限的编码负载。
+
 #### 运行方法
 
-当前工具集 Group F（1080p ultrafast）可作参考，4K ultrafast 需手动指定参数：
+当前工具集 Group F（1080p ultrafast）可作参考，4K ultrafast 已通过 Group H 原生支持：
 
 ```bash
 # 方法：直接用 Group B 参数，结合 --preset 选项（如脚本支持）
@@ -852,5 +884,6 @@ perf stat -e uncore_imc_0/cas_count_read/,uncore_imc_1/cas_count_read/ \
 
 | 版本 | 日期 | 主要变更 |
 |------|------|---------|
-| v1.1.0 | 2025-03-16 | CCD/threads 自动探测、`--target-fps`、CPU/MEM 采样、NUMA round-robin |
+| v1.1.1 | 2026-03-17 | 新增 Group H（4K x265 ultrafast，内存带宽压测）、README 扩展测试组说明至 A-H |
+| v1.1.0 | 2026-03-16 | CCD/threads 自动探测、`--target-fps`、CPU/MEM 采样、NUMA round-robin |
 | v1.0.0 | 2025-06-04 | 初始版本，A-G 测试组，24ch 基准数据 |
