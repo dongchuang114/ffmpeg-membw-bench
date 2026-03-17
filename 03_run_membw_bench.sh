@@ -3,7 +3,7 @@
 # 用法: bash 03_run_membw_bench.sh [OPTIONS]
 #   --channels N      当前 BIOS 启用的内存通道数（用于结果标记，默认 24）
 #   --duration N      每组测试时长（秒，默认 60）
-#   --group A|B|C|D|E|F|G|H  只跑指定测试组（默认全部）
+#   --group A|B|C|D|E|F|G|H|I  只跑指定测试组（默认全部）
 #   --output-dir DIR  结果输出目录（默认 results/Nch_TIMESTAMP）
 #   --instances N     并行实例数（默认 0=自动探测 CCD 数）
 #   --threads N       每实例线程数（默认 0=自动探测 nproc/ccd_count）
@@ -1005,6 +1005,139 @@ if should_run H && ! should_skip H; then
 }
 EOF
     log "[H] Done. Result: ${HDIR}/result.json"
+fi
+
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 I：INSTANCES 并行实例，4K SVT-AV1 preset=10（AV1 编码基准）
+#
+# 背景：SVT-AV1（Scalable Video Technology for AV1）是 Intel/Netflix 联合开发的
+#       高性能 AV1 编码器，支持多核并行。preset 范围 0（最慢/最优质）到 12（最快）。
+#       preset 10 是速度/质量平衡点，单实例 4K 约 19-20 fps（1线程，EPYC 9755）。
+#
+# 与 x265 medium 对比（单实例 × 1线程）：
+#   x265 medium   → 3.2 fps  （高压缩率，H.265格式，广泛兼容）
+#   SVT-AV1 p10   → 19.5 fps （AV1格式，下一代编解码，压缩率更高约20-30%）
+#   SVT-AV1 p8    → 9.1 fps  （对等质量基准，与 x265 medium 相近质量）
+#
+# 注意：本组通过 ffmpeg stdout pipe 向 SvtAv1EncApp 传递 raw YUV，
+#       因为系统 ffmpeg 4.4 编译时未启用 --enable-libsvtav1。
+#       这不影响编码性能测量（pipe 开销 <2%）。
+#
+# AV1 优势：
+#   - 相同质量下码率比 H.265 低 20-30%，比 H.264 低 40-50%
+#   - 完全开源免版权费
+#   - Netflix/YouTube/Chrome 生产环境大规模使用
+#
+# 客户场景：流媒体平台 AV1 转码（YouTube/Netflix 同类工作负载）
+# CPU压力：高（preset 10 单实例约 60-70% 单核利用率，多实例下全核满载）
+# 内存压力：中（AV1 参考帧结构复杂，内存占用高于 x265）
+# ────────────────────────────────────────────────────────────────
+if should_run I && ! should_skip I; then
+    SVT_PRESET="${SVT_PRESET:-10}"
+    log_banner "I" "AV1 编码基准（4K SVT-AV1 preset=${SVT_PRESET}）" \
+        "流媒体平台 AV1 转码（YouTube/Netflix 同类工作负载）" \
+        "4K | SVT-AV1 preset=${SVT_PRESET} | lp=1 | ${INSTANCES}路并发 | numactl绑定" \
+        "高" "多实例下 CPU 全核满载，AV1 计算量介于 x265 medium 和 ultrafast 之间" \
+        "中" "AV1 参考帧结构复杂，内存占用高于 x265；带宽利用率约 10-15%" \
+        "对比B组：SVT-AV1 p8 FPS 约 2.8x，p10 约 6x，p12 约 9x；AV1 压缩率高 20-30%"
+    log "============================================"
+    log " Group I: ${INSTANCES} parallel 4K SVT-AV1 preset=${SVT_PRESET}"
+    log "============================================"
+    IDIR="${OUTPUT_DIR}/groupI_parallel_svtav1_p${SVT_PRESET}"
+    mkdir -p "$IDIR"
+
+    if ! command -v SvtAv1EncApp &>/dev/null; then
+        log "[I] ERROR: SvtAv1EncApp not found. Install with: apt-get install svt-av1"
+        log "[I] Skipping Group I."
+    else
+        log "[I] Launching ${INSTANCES} ffmpeg|SvtAv1EncApp instances (${DURATION}s)..."
+        FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        PIDS=()
+        for i in $(seq 0 $((INSTANCES - 1))); do
+            NODE=$(assign_numa_node "$i")
+            numactl --cpunodebind=${NODE} --membind=${NODE} \
+                bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                    ${FPS_ARGS} \
+                    -stream_loop -1 -i \"${INPUT}\" \
+                    -t \"${DURATION}\" \
+                    -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
+                SvtAv1EncApp -i stdin -w 3840 -h 2160 \
+                    --fps-num 30 --fps-denom 1 \
+                    --preset ${SVT_PRESET} --lp 1 \
+                    -n $((DURATION * 30)) \
+                    -b /dev/null 2>&1" \
+                    >> "${IDIR}/instance_${i}.log" 2>&1 &
+            PIDS+=($!)
+        done
+        log "[I] All instances launched. PIDs: ${PIDS[*]}"
+        log "[I] Waiting for completion..."
+
+        START_I=$(date +%s)
+        bash ${PROJ}/04_collect_metrics.sh \
+            --output "${IDIR}/bandwidth.csv" \
+            --interval 5 \
+            --pids "${PIDS[*]}" &
+        MONITOR_PID=$!
+
+        wait "${PIDS[@]}"
+        END_I=$(date +%s)
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        ELAPSED_I=$((END_I - START_I))
+        log "[I] All instances completed in ${ELAPSED_I}s"
+        summarize_metrics "${IDIR}/bandwidth.csv" "I"
+
+        # SVT-AV1 输出格式：'Average Speed:   19.458 fps'（不同于 ffmpeg 的 (N fps)）
+        parse_svt_fps() {
+            grep -oP 'Average Speed:\s+\K[0-9.]+' "$1" 2>/dev/null | tail -1
+        }
+
+        TOTAL_FPS_I=0
+        FPS_LIST_I=()
+        for i in $(seq 0 $((INSTANCES - 1))); do
+            FPS_I=$(parse_svt_fps "${IDIR}/instance_${i}.log")
+            FPS_LIST_I+=("${FPS_I:-0}")
+            TOTAL_FPS_I=$(echo "$TOTAL_FPS_I + ${FPS_I:-0}" | bc)
+        done
+        AVG_FPS_I=$(echo "scale=2; $TOTAL_FPS_I / $INSTANCES" | bc)
+        log "[I] Total FPS: ${TOTAL_FPS_I}, Avg per instance: ${AVG_FPS_I}"
+
+        FPS_JSON_I=$(printf '%s\n' "${FPS_LIST_I[@]}" | jq -R . | jq -s .)
+        cat > "${IDIR}/result.json" <<EOF
+{
+  "group": "I",
+  "scenario": {
+    "name": "AV1 编码基准（4K SVT-AV1 preset=${SVT_PRESET}）",
+    "characteristics": ["4K分辨率", "SVT-AV1 preset=${SVT_PRESET}", "lp=1", "${INSTANCES}路并发"],
+    "cpu_pressure": {"level": "高", "desc": "多实例下 CPU 全核满载"},
+    "memory_pressure": {"level": "中", "desc": "AV1 参考帧结构复杂，内存占用高于 x265"},
+    "expected": "对比B组（x265 medium）：FPS 约 6x（preset 10），压缩率高 20-30%"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libsvtav1",
+    "preset": ${SVT_PRESET},
+    "lp": 1,
+    "pipe_method": "ffmpeg_stdout_to_SvtAv1EncApp_stdin",
+    "threads_per_instance": ${THREADS},
+    "instances": ${INSTANCES}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INSTANCES},
+  "duration_s": ${ELAPSED_I},
+  "avg_fps_per_instance": ${AVG_FPS_I},
+  "total_fps": ${TOTAL_FPS_I},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[I_cpu]},
+  "iowait_pct": ${METRICS[I_iowait]},
+  "mem_used_gb": ${METRICS[I_mem]},
+  "membw_read_gbs": ${METRICS[I_bw]},
+  "fps_per_instance": ${FPS_JSON_I}
+}
+EOF
+        log "[I] Done. Result: ${IDIR}/result.json"
+    fi
 fi
 
 
