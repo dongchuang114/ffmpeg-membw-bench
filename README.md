@@ -648,6 +648,53 @@ x265 在多线程模式下使用 **WPP（Wavefront Parallel Processing）**：
 
 ### 多实例扩展测试步骤
 
+#### 多实例扩展测试命令（五组对比实验）
+
+以下五条命令构成一组完整的多实例扩展对比实验，对应《EPYC 9755 多实例扩展对比报告》中的全部测试用例：
+
+```bash
+cd /workspace/chuadong/work/benchmark/ffmpeg-membw-bench
+OUTBASE=/tmp/scaling_$(date +%m%d)
+
+# 1. x265 medium 32×8t（基准）
+bash 03_run_membw_bench.sh --group B --instances 32 --threads 8 \
+    --duration 60 --output-dir ${OUTBASE}/32x8t
+
+# 2. x265 medium 64×4t
+bash 03_run_membw_bench.sh --group B --instances 64 --threads 4 \
+    --duration 60 --output-dir ${OUTBASE}/64x4t
+
+# 3. x265 medium 128×2t
+bash 03_run_membw_bench.sh --group B --instances 128 --threads 2 \
+    --duration 60 --output-dir ${OUTBASE}/128x2t
+
+# 4. x265 medium 256×1t（最优）
+bash 03_run_membw_bench.sh --group B --instances 256 --threads 1 \
+    --duration 60 --output-dir ${OUTBASE}/256x1t
+
+# 5. x265 ultrafast 256×1t（内存压测）
+bash 03_run_membw_bench.sh --group H --instances 256 --threads 1 \
+    --duration 60 --output-dir ${OUTBASE}/256x1t_ultrafast
+```
+
+跑完后汇总结果：
+
+```bash
+for cfg in 32x8t 64x4t 128x2t 256x1t; do
+  echo -n "${cfg}  "
+  jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
+    ${OUTBASE}/${cfg}/groupB_parallel_x265/result.json 2>/dev/null || echo "NOT FOUND"
+done
+echo -n "256x1t_ultrafast  "
+jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
+  ${OUTBASE}/256x1t_ultrafast/groupH_parallel_x265_ultrafast/result.json 2>/dev/null || echo "NOT FOUND"
+```
+
+> **注意**：各组顺序执行，每组约 60-90s，全部完成约 **6-8 分钟**。
+> 256 实例组因进程数多，metrics 采集阶段稍慢，属正常现象。
+
+---
+
 以 EPYC 9755 2P（256 核，2 NUMA 节点，4K x265 medium，24ch DDR5-6400）为例，
 从 32 实例逐步扩展到 256 实例。
 

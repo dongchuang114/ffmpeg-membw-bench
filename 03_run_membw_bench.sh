@@ -3,7 +3,7 @@
 # 用法: bash 03_run_membw_bench.sh [OPTIONS]
 #   --channels N      当前 BIOS 启用的内存通道数（用于结果标记，默认 24）
 #   --duration N      每组测试时长（秒，默认 60）
-#   --group A|B|C|D|E|F|G|H|I  只跑指定测试组（默认全部）
+#   --group A|B|C|D|E|F|G|H|I|J|K|L|M|N|O  只跑指定测试组（默认全部）
 #   --output-dir DIR  结果输出目录（默认 results/Nch_TIMESTAMP）
 #   --instances N     并行实例数（默认 0=自动探测 CCD 数）
 #   --threads N       每实例线程数（默认 0=自动探测 nproc/ccd_count）
@@ -12,6 +12,7 @@
 #   -h, --help        显示帮助
 
 set -e
+ulimit -n 65536 2>/dev/null || true  # 防止 256 实例 fd 耗尽
 
 # ── 默认参数 ──────────────────────────────────
 CHANNELS=24
@@ -1162,6 +1163,781 @@ EOF
     fi
 fi
 
+
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 J：32 并行实例，4K SVT-AV1 preset=10（AV1 扩展基线）
+#
+# 目标：AV1 实例扩展曲线第 1 点（32 核）
+# 固定 32 实例（不受 CCD 探测影响），对比 K/L/I 组形成完整扩展曲线。
+# 预期：CPU ~12.5%，总 FPS ~245（7.65×32）
+# ────────────────────────────────────────────────────────────────
+if should_run J && ! should_skip J; then
+    INST_J=32
+    SVT_PRESET_J="${SVT_PRESET_J:-10}"
+    log_banner "J" "AV1 扩展基线（32实例 × SVT-AV1 preset=${SVT_PRESET_J}）" \
+        "AV1 实例扩展曲线第1点，与 K/L/I 组形成完整扩展曲线" \
+        "4K | SVT-AV1 preset=${SVT_PRESET_J} | lp=1 | 32路并发 | numactl绑定" \
+        "低" "32实例仅占用约12.5% CPU，扩展性测量基准点" \
+        "低" "内存带宽与实例数线性正相关" \
+        "对比 K(64)/L(128)/I(${INSTANCES}) 验证 AV1 线性扩展特性"
+    log "============================================"
+    log " Group J: ${INST_J} parallel 4K SVT-AV1 preset=${SVT_PRESET_J} (scaling baseline)"
+    log "============================================"
+    JDIR="${OUTPUT_DIR}/groupJ_svtav1_p${SVT_PRESET_J}_32x1t"
+    mkdir -p "$JDIR"
+
+    # 自动检测编码路径
+    if ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+        SVT_MODE_J="libsvtav1"
+    elif command -v SvtAv1EncApp &>/dev/null; then
+        SVT_MODE_J="pipe"
+    else
+        log "[J] ERROR: Neither ffmpeg libsvtav1 nor SvtAv1EncApp found. Skipping Group J."
+        SVT_MODE_J="none"
+    fi
+
+    if [ "$SVT_MODE_J" != "none" ]; then
+        log "[J] SVT encoder mode: ${SVT_MODE_J}"
+        log "[J] Launching ${INST_J} instances (${DURATION}s, preset=${SVT_PRESET_J})..."
+        FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        PIDS=()
+        for i in $(seq 0 $((INST_J - 1))); do
+            NODE=$(assign_numa_node "$i")
+            if [ "$SVT_MODE_J" = "libsvtav1" ]; then
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} \
+                        -stream_loop -1 -i "${INPUT}" \
+                        -t "${DURATION}" \
+                        -c:v libsvtav1 -preset ${SVT_PRESET_J} \
+                        -svtav1-params "lp=1" \
+                        -f null - \
+                        >> "${JDIR}/instance_${i}.log" 2>&1 &
+            else
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
+                    SvtAv1EncApp -i stdin -w 3840 -h 2160 \
+                        --fps-num 30 --fps-denom 1 \
+                        --preset ${SVT_PRESET_J} --lp 1 \
+                        -n $((DURATION * 30)) -b /dev/null 2>&1" \
+                        >> "${JDIR}/instance_${i}.log" 2>&1 &
+            fi
+            PIDS+=($!)
+        done
+        log "[J] All instances launched. PIDs: ${PIDS[*]}"
+        log "[J] Waiting for completion..."
+
+        START_J=$(date +%s)
+        bash ${PROJ}/04_collect_metrics.sh \
+            --output "${JDIR}/bandwidth.csv" \
+            --interval 5 \
+            --pids "${PIDS[*]}" &
+        MONITOR_PID=$!
+
+        wait "${PIDS[@]}" || log "[J] WARNING: One or more instances exited with error (possible OOM)"
+        END_J=$(date +%s)
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        ELAPSED_J=$((END_J - START_J))
+        log "[J] All instances completed in ${ELAPSED_J}s"
+        summarize_metrics "${JDIR}/bandwidth.csv" "J"
+        : "${METRICS[J_cpu]:=0}"; : "${METRICS[J_iowait]:=0}"
+        : "${METRICS[J_mem]:=0}"; : "${METRICS[J_bw]:=0}"
+
+        TOTAL_FPS_J=0
+        FPS_LIST_J=()
+        for i in $(seq 0 $((INST_J - 1))); do
+            if [ "$SVT_MODE_J" = "libsvtav1" ]; then
+                FPS_I=$(parse_fps "${JDIR}/instance_${i}.log")
+            else
+                FPS_I=$(grep -oP 'Average Speed:\s+\K[0-9.]+' "${JDIR}/instance_${i}.log" 2>/dev/null | tail -1)
+            fi
+            FPS_LIST_J+=("${FPS_I:-0}")
+            TOTAL_FPS_J=$(echo "$TOTAL_FPS_J + ${FPS_I:-0}" | bc)
+        done
+        AVG_FPS_J=$(echo "scale=2; $TOTAL_FPS_J / $INST_J" | bc)
+        log "[J] Total FPS: ${TOTAL_FPS_J}, Avg per instance: ${AVG_FPS_J}"
+
+        FPS_JSON_J=$(printf '%s\n' "${FPS_LIST_J[@]}" | jq -R . | jq -s .)
+        cat > "${JDIR}/result.json" <<EOF
+{
+  "group": "J",
+  "scenario": {
+    "name": "AV1 扩展基线（32实例 × SVT-AV1 preset=${SVT_PRESET_J}）",
+    "characteristics": ["4K分辨率", "SVT-AV1 preset=${SVT_PRESET_J}", "lp=1", "32路并发"],
+    "cpu_pressure": {"level": "低", "desc": "32实例仅占用约12.5% CPU，扩展性测量基准点"},
+    "memory_pressure": {"level": "低", "desc": "内存带宽与实例数线性正相关"},
+    "expected": "对比 K(64)/L(128)/I(${INSTANCES}) 验证 AV1 线性扩展特性"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libsvtav1",
+    "preset": ${SVT_PRESET_J},
+    "lp": 1,
+    "encode_method": "${SVT_MODE_J}",
+    "threads_per_instance": 1,
+    "instances": ${INST_J}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INST_J},
+  "duration_s": ${ELAPSED_J},
+  "avg_fps_per_instance": ${AVG_FPS_J},
+  "total_fps": ${TOTAL_FPS_J},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[J_cpu]},
+  "iowait_pct": ${METRICS[J_iowait]},
+  "mem_used_gb": ${METRICS[J_mem]},
+  "membw_read_gbs": ${METRICS[J_bw]},
+  "fps_per_instance": ${FPS_JSON_J}
+}
+EOF
+        log "[J] Done. Result: ${JDIR}/result.json"
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 K：64 并行实例，4K SVT-AV1 preset=10（AV1 扩展中段）
+#
+# 目标：AV1 实例扩展曲线第 2 点（64 核）
+# 预期：CPU ~25%，总 FPS ~490
+# ────────────────────────────────────────────────────────────────
+if should_run K && ! should_skip K; then
+    INST_K=64
+    SVT_PRESET_K="${SVT_PRESET_K:-10}"
+    log_banner "K" "AV1 扩展中段（64实例 × SVT-AV1 preset=${SVT_PRESET_K}）" \
+        "AV1 实例扩展曲线第2点，验证线性扩展" \
+        "4K | SVT-AV1 preset=${SVT_PRESET_K} | lp=1 | 64路并发 | numactl绑定" \
+        "中低" "64实例约占25% CPU" \
+        "低中" "内存带宽约为 J 组2倍" \
+        "对比 J(32)/L(128)/I(${INSTANCES}) 验证 AV1 线性扩展"
+    log "============================================"
+    log " Group K: ${INST_K} parallel 4K SVT-AV1 preset=${SVT_PRESET_K}"
+    log "============================================"
+    KDIR="${OUTPUT_DIR}/groupK_svtav1_p${SVT_PRESET_K}_64x1t"
+    mkdir -p "$KDIR"
+
+    if ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+        SVT_MODE_K="libsvtav1"
+    elif command -v SvtAv1EncApp &>/dev/null; then
+        SVT_MODE_K="pipe"
+    else
+        log "[K] ERROR: Neither ffmpeg libsvtav1 nor SvtAv1EncApp found. Skipping Group K."
+        SVT_MODE_K="none"
+    fi
+
+    if [ "$SVT_MODE_K" != "none" ]; then
+        log "[K] SVT encoder mode: ${SVT_MODE_K}"
+        log "[K] Launching ${INST_K} instances (${DURATION}s, preset=${SVT_PRESET_K})..."
+        FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        PIDS=()
+        for i in $(seq 0 $((INST_K - 1))); do
+            NODE=$(assign_numa_node "$i")
+            if [ "$SVT_MODE_K" = "libsvtav1" ]; then
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} \
+                        -stream_loop -1 -i "${INPUT}" \
+                        -t "${DURATION}" \
+                        -c:v libsvtav1 -preset ${SVT_PRESET_K} \
+                        -svtav1-params "lp=1" \
+                        -f null - \
+                        >> "${KDIR}/instance_${i}.log" 2>&1 &
+            else
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
+                    SvtAv1EncApp -i stdin -w 3840 -h 2160 \
+                        --fps-num 30 --fps-denom 1 \
+                        --preset ${SVT_PRESET_K} --lp 1 \
+                        -n $((DURATION * 30)) -b /dev/null 2>&1" \
+                        >> "${KDIR}/instance_${i}.log" 2>&1 &
+            fi
+            PIDS+=($!)
+        done
+        log "[K] All instances launched. PIDs: ${PIDS[*]}"
+        log "[K] Waiting for completion..."
+
+        START_K=$(date +%s)
+        bash ${PROJ}/04_collect_metrics.sh \
+            --output "${KDIR}/bandwidth.csv" \
+            --interval 5 \
+            --pids "${PIDS[*]}" &
+        MONITOR_PID=$!
+
+        wait "${PIDS[@]}" || log "[K] WARNING: One or more instances exited with error (possible OOM)"
+        END_K=$(date +%s)
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        ELAPSED_K=$((END_K - START_K))
+        log "[K] All instances completed in ${ELAPSED_K}s"
+        summarize_metrics "${KDIR}/bandwidth.csv" "K"
+        : "${METRICS[K_cpu]:=0}"; : "${METRICS[K_iowait]:=0}"
+        : "${METRICS[K_mem]:=0}"; : "${METRICS[K_bw]:=0}"
+
+        TOTAL_FPS_K=0
+        FPS_LIST_K=()
+        for i in $(seq 0 $((INST_K - 1))); do
+            if [ "$SVT_MODE_K" = "libsvtav1" ]; then
+                FPS_I=$(parse_fps "${KDIR}/instance_${i}.log")
+            else
+                FPS_I=$(grep -oP 'Average Speed:\s+\K[0-9.]+' "${KDIR}/instance_${i}.log" 2>/dev/null | tail -1)
+            fi
+            FPS_LIST_K+=("${FPS_I:-0}")
+            TOTAL_FPS_K=$(echo "$TOTAL_FPS_K + ${FPS_I:-0}" | bc)
+        done
+        AVG_FPS_K=$(echo "scale=2; $TOTAL_FPS_K / $INST_K" | bc)
+        log "[K] Total FPS: ${TOTAL_FPS_K}, Avg per instance: ${AVG_FPS_K}"
+
+        FPS_JSON_K=$(printf '%s\n' "${FPS_LIST_K[@]}" | jq -R . | jq -s .)
+        cat > "${KDIR}/result.json" <<EOF
+{
+  "group": "K",
+  "scenario": {
+    "name": "AV1 扩展中段（64实例 × SVT-AV1 preset=${SVT_PRESET_K}）",
+    "characteristics": ["4K分辨率", "SVT-AV1 preset=${SVT_PRESET_K}", "lp=1", "64路并发"],
+    "cpu_pressure": {"level": "中低", "desc": "64实例约占25% CPU"},
+    "memory_pressure": {"level": "低中", "desc": "内存带宽约为 J 组2倍"},
+    "expected": "对比 J(32)/L(128)/I(${INSTANCES}) 验证 AV1 线性扩展"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libsvtav1",
+    "preset": ${SVT_PRESET_K},
+    "lp": 1,
+    "encode_method": "${SVT_MODE_K}",
+    "threads_per_instance": 1,
+    "instances": ${INST_K}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INST_K},
+  "duration_s": ${ELAPSED_K},
+  "avg_fps_per_instance": ${AVG_FPS_K},
+  "total_fps": ${TOTAL_FPS_K},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[K_cpu]},
+  "iowait_pct": ${METRICS[K_iowait]},
+  "mem_used_gb": ${METRICS[K_mem]},
+  "membw_read_gbs": ${METRICS[K_bw]},
+  "fps_per_instance": ${FPS_JSON_K}
+}
+EOF
+        log "[K] Done. Result: ${KDIR}/result.json"
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 L：128 并行实例，4K SVT-AV1 preset=10（AV1 扩展高段）
+#
+# 目标：AV1 实例扩展曲线第 3 点（128 核）
+# 预期：CPU ~50%，总 FPS ~985
+# 注意：128 实例内存需求约 256GB，运行前预检
+# ────────────────────────────────────────────────────────────────
+if should_run L && ! should_skip L; then
+    INST_L=128
+    SVT_PRESET_L="${SVT_PRESET_L:-10}"
+    log_banner "L" "AV1 扩展高段（128实例 × SVT-AV1 preset=${SVT_PRESET_L}）" \
+        "AV1 实例扩展曲线第3点，验证高并发线性扩展" \
+        "4K | SVT-AV1 preset=${SVT_PRESET_L} | lp=1 | 128路并发 | numactl绑定" \
+        "中" "128实例约占50% CPU" \
+        "中高" "AV1 参考帧占用较高，128实例内存压力显著" \
+        "对比 J(32)/K(64)/I(${INSTANCES}) 验证 AV1 线性扩展到高并发"
+
+    # 内存预检
+    AVAIL_MEM_GB=$(awk '/MemAvailable/{print int($2/1024/1024)}' /proc/meminfo)
+    REQUIRED_MEM_GB=$(( INST_L * 2 ))
+    if [ "$AVAIL_MEM_GB" -lt "$REQUIRED_MEM_GB" ]; then
+        log "[L] WARNING: Available ${AVAIL_MEM_GB}GB < estimated ${REQUIRED_MEM_GB}GB, OOM risk HIGH"
+    else
+        log "[L] Memory check OK: ${AVAIL_MEM_GB}GB available (need ~${REQUIRED_MEM_GB}GB)"
+    fi
+
+    log "============================================"
+    log " Group L: ${INST_L} parallel 4K SVT-AV1 preset=${SVT_PRESET_L}"
+    log "============================================"
+    LDIR="${OUTPUT_DIR}/groupL_svtav1_p${SVT_PRESET_L}_128x1t"
+    mkdir -p "$LDIR"
+
+    if ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+        SVT_MODE_L="libsvtav1"
+    elif command -v SvtAv1EncApp &>/dev/null; then
+        SVT_MODE_L="pipe"
+    else
+        log "[L] ERROR: Neither ffmpeg libsvtav1 nor SvtAv1EncApp found. Skipping Group L."
+        SVT_MODE_L="none"
+    fi
+
+    if [ "$SVT_MODE_L" != "none" ]; then
+        log "[L] SVT encoder mode: ${SVT_MODE_L}"
+        log "[L] Launching ${INST_L} instances (${DURATION}s, preset=${SVT_PRESET_L})..."
+        FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        PIDS=()
+        for i in $(seq 0 $((INST_L - 1))); do
+            NODE=$(assign_numa_node "$i")
+            if [ "$SVT_MODE_L" = "libsvtav1" ]; then
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} \
+                        -stream_loop -1 -i "${INPUT}" \
+                        -t "${DURATION}" \
+                        -c:v libsvtav1 -preset ${SVT_PRESET_L} \
+                        -svtav1-params "lp=1" \
+                        -f null - \
+                        >> "${LDIR}/instance_${i}.log" 2>&1 &
+            else
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
+                    SvtAv1EncApp -i stdin -w 3840 -h 2160 \
+                        --fps-num 30 --fps-denom 1 \
+                        --preset ${SVT_PRESET_L} --lp 1 \
+                        -n $((DURATION * 30)) -b /dev/null 2>&1" \
+                        >> "${LDIR}/instance_${i}.log" 2>&1 &
+            fi
+            PIDS+=($!)
+        done
+        log "[L] All instances launched. PIDs: ${PIDS[*]}"
+        log "[L] Waiting for completion..."
+
+        START_L=$(date +%s)
+        bash ${PROJ}/04_collect_metrics.sh \
+            --output "${LDIR}/bandwidth.csv" \
+            --interval 5 \
+            --pids "${PIDS[*]}" &
+        MONITOR_PID=$!
+
+        wait "${PIDS[@]}" || log "[L] WARNING: One or more instances exited with error (possible OOM)"
+        END_L=$(date +%s)
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        ELAPSED_L=$((END_L - START_L))
+        log "[L] All instances completed in ${ELAPSED_L}s"
+        summarize_metrics "${LDIR}/bandwidth.csv" "L"
+        : "${METRICS[L_cpu]:=0}"; : "${METRICS[L_iowait]:=0}"
+        : "${METRICS[L_mem]:=0}"; : "${METRICS[L_bw]:=0}"
+
+        TOTAL_FPS_L=0
+        FPS_LIST_L=()
+        for i in $(seq 0 $((INST_L - 1))); do
+            if [ "$SVT_MODE_L" = "libsvtav1" ]; then
+                FPS_I=$(parse_fps "${LDIR}/instance_${i}.log")
+            else
+                FPS_I=$(grep -oP 'Average Speed:\s+\K[0-9.]+' "${LDIR}/instance_${i}.log" 2>/dev/null | tail -1)
+            fi
+            FPS_LIST_L+=("${FPS_I:-0}")
+            TOTAL_FPS_L=$(echo "$TOTAL_FPS_L + ${FPS_I:-0}" | bc)
+        done
+        AVG_FPS_L=$(echo "scale=2; $TOTAL_FPS_L / $INST_L" | bc)
+        log "[L] Total FPS: ${TOTAL_FPS_L}, Avg per instance: ${AVG_FPS_L}"
+
+        FPS_JSON_L=$(printf '%s\n' "${FPS_LIST_L[@]}" | jq -R . | jq -s .)
+        cat > "${LDIR}/result.json" <<EOF
+{
+  "group": "L",
+  "scenario": {
+    "name": "AV1 扩展高段（128实例 × SVT-AV1 preset=${SVT_PRESET_L}）",
+    "characteristics": ["4K分辨率", "SVT-AV1 preset=${SVT_PRESET_L}", "lp=1", "128路并发"],
+    "cpu_pressure": {"level": "中", "desc": "128实例约占50% CPU"},
+    "memory_pressure": {"level": "中高", "desc": "AV1 参考帧占用较高，128实例内存压力显著"},
+    "expected": "对比 J(32)/K(64)/I(${INSTANCES}) 验证 AV1 线性扩展到高并发"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libsvtav1",
+    "preset": ${SVT_PRESET_L},
+    "lp": 1,
+    "encode_method": "${SVT_MODE_L}",
+    "threads_per_instance": 1,
+    "instances": ${INST_L}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INST_L},
+  "duration_s": ${ELAPSED_L},
+  "avg_fps_per_instance": ${AVG_FPS_L},
+  "total_fps": ${TOTAL_FPS_L},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[L_cpu]},
+  "iowait_pct": ${METRICS[L_iowait]},
+  "mem_used_gb": ${METRICS[L_mem]},
+  "membw_read_gbs": ${METRICS[L_bw]},
+  "fps_per_instance": ${FPS_JSON_L}
+}
+EOF
+        log "[L] Done. Result: ${LDIR}/result.json"
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 M：INSTANCES 并行实例，4K x265 fast（preset 梯度测试）
+#
+# 目标：填补 medium（~819 fps）→ ultrafast（~1960 fps）之间的 preset 空档
+# 预期：CPU ~98%，总 FPS ~1100-1300
+# ────────────────────────────────────────────────────────────────
+if should_run M && ! should_skip M; then
+    if [ "${INSTANCES}" -le 0 ]; then
+        log "[M] INSTANCES=0, skipping."
+    else
+        log_banner "M" "preset 梯度（4K x265 fast ${INSTANCES}×1t）" \
+            "填补 medium→ultrafast 之间的 preset 性能空档" \
+            "4K | x265 fast | pools=none | ${INSTANCES}路并发 | numactl绑定" \
+            "极高" "fast 计算量介于 medium 和 ultrafast 之间，CPU ~98%" \
+            "高" "fast ref=2 减少参考帧，内存带宽需求低于 medium" \
+            "对比 H(ultrafast)/B(medium)：fast FPS 约 1100-1300，填补性能梯度"
+        log "============================================"
+        log " Group M: ${INSTANCES} parallel 4K x265 fast (preset gradient)"
+        log "============================================"
+        MDIR="${OUTPUT_DIR}/groupM_x265_fast_${INSTANCES}x1t"
+        mkdir -p "$MDIR"
+
+        log "[M] Launching ${INSTANCES} ffmpeg instances x265 fast (${DURATION}s)..."
+        FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        PIDS=()
+        for i in $(seq 0 $((INSTANCES - 1))); do
+            NODE=$(assign_numa_node "$i")
+            numactl --cpunodebind=${NODE} --membind=${NODE} \
+                ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                    ${FPS_ARGS} \
+                    -stream_loop -1 -i "$INPUT" \
+                    -t "$DURATION" \
+                    -c:v libx265 -preset fast \
+                    -x265-params "pools=none" \
+                    -threads 1 \
+                    -f null - \
+                    >> "${MDIR}/instance_${i}.log" 2>&1 &
+            PIDS+=($!)
+        done
+        log "[M] All instances launched. Waiting..."
+        START_M=$(date +%s)
+        bash ${PROJ}/04_collect_metrics.sh \
+            --output "${MDIR}/bandwidth.csv" \
+            --interval 5 \
+            --pids "${PIDS[*]}" &
+        MONITOR_PID=$!
+
+        wait "${PIDS[@]}" || log "[M] WARNING: One or more instances exited with error (possible OOM)"
+        END_M=$(date +%s)
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        ELAPSED_M=$((END_M - START_M))
+        log "[M] All instances completed in ${ELAPSED_M}s"
+        summarize_metrics "${MDIR}/bandwidth.csv" "M"
+        : "${METRICS[M_cpu]:=0}"; : "${METRICS[M_iowait]:=0}"
+        : "${METRICS[M_mem]:=0}"; : "${METRICS[M_bw]:=0}"
+
+        TOTAL_FPS_M=0
+        FPS_LIST_M=()
+        for i in $(seq 0 $((INSTANCES - 1))); do
+            FPS_I=$(parse_fps "${MDIR}/instance_${i}.log")
+            FPS_LIST_M+=("${FPS_I:-0}")
+            TOTAL_FPS_M=$(echo "$TOTAL_FPS_M + ${FPS_I:-0}" | bc)
+        done
+        AVG_FPS_M=$(echo "scale=2; $TOTAL_FPS_M / $INSTANCES" | bc)
+        log "[M] Total FPS: ${TOTAL_FPS_M}, Avg per instance: ${AVG_FPS_M}"
+
+        FPS_JSON_M=$(printf '%s\n' "${FPS_LIST_M[@]}" | jq -R . | jq -s .)
+        cat > "${MDIR}/result.json" <<EOF
+{
+  "group": "M",
+  "scenario": {
+    "name": "preset 梯度（4K x265 fast ${INSTANCES}×1t）",
+    "characteristics": ["4K分辨率", "x265 fast预设", "pools=none", "${INSTANCES}路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "fast 计算量介于 medium 和 ultrafast 之间，CPU ~98%"},
+    "memory_pressure": {"level": "高", "desc": "fast ref=2 减少参考帧，内存带宽需求低于 medium"},
+    "expected": "对比 H(ultrafast)/B(medium)：fast FPS 约 1100-1300，填补性能梯度"
+  },
+  "params": {
+    "resolution": "3840x2160",
+    "codec": "libx265",
+    "preset": "fast",
+    "x265_params": "pools=none",
+    "encode_method": "libx265",
+    "threads_per_instance": 1,
+    "instances": ${INSTANCES}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INSTANCES},
+  "duration_s": ${ELAPSED_M},
+  "avg_fps_per_instance": ${AVG_FPS_M},
+  "total_fps": ${TOTAL_FPS_M},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[M_cpu]},
+  "iowait_pct": ${METRICS[M_iowait]},
+  "mem_used_gb": ${METRICS[M_mem]},
+  "membw_read_gbs": ${METRICS[M_bw]},
+  "fps_per_instance": ${FPS_JSON_M}
+}
+EOF
+        log "[M] Done. Result: ${MDIR}/result.json"
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 N：INSTANCES 并行实例，1080p x265 medium（分辨率对比）
+#
+# 目标：从 4K→1080p，像素量降低4x，理论 FPS 提升约 4x
+# 预期：CPU ~98%，总 FPS ~3200+
+# ────────────────────────────────────────────────────────────────
+if should_run N && ! should_skip N; then
+    if [ "${INSTANCES}" -le 0 ]; then
+        log "[N] INSTANCES=0, skipping."
+    else
+        log_banner "N" "分辨率对比（1080p x265 medium ${INSTANCES}×1t）" \
+            "分辨率从4K降至1080p，像素量降低4x，对比内存带宽变化" \
+            "1080p | x265 medium | pools=none | ${INSTANCES}路并发 | numactl绑定" \
+            "极高" "medium 计算量 CPU ~98%，但 1080p 帧率约4x于 4K" \
+            "低" "1080p working set ~5MB/实例，全部驻留 L3，几乎不访问 DRAM" \
+            "对比 B组(4K medium)：FPS 约 4x，内存带宽反而下降，验证缓存命中提升"
+        log "============================================"
+        log " Group N: ${INSTANCES} parallel 1080p x265 medium (resolution comparison)"
+        log "============================================"
+        NDIR="${OUTPUT_DIR}/groupN_1080p_x265_medium_${INSTANCES}x1t"
+        mkdir -p "$NDIR"
+
+        # 生成或验证 1080p 输入文件
+        INPUT_1080P="/dev/shm/input_1080p.yuv"
+        EXPECTED_1080P_SIZE=$(( 1920 * 1080 * 3 / 2 * 10 * 30 ))
+        ACTUAL_SIZE=$(stat -c%s "$INPUT_1080P" 2>/dev/null || echo 0)
+        if [ "$ACTUAL_SIZE" -lt "$(( EXPECTED_1080P_SIZE * 9 / 10 ))" ]; then
+            log "[N] Generating 1080p input (~$(( EXPECTED_1080P_SIZE / 1024 / 1024 ))MB)..."
+            ffmpeg -f lavfi -i color=gray:s=1920x1080:r=30 \
+                -t 10 -f rawvideo -pix_fmt yuv420p -y "$INPUT_1080P" 2>/dev/null
+            log "[N] 1080p input ready: $(stat -c%s $INPUT_1080P) bytes"
+        else
+            log "[N] 1080p input exists: ${ACTUAL_SIZE} bytes"
+        fi
+
+        log "[N] Launching ${INSTANCES} ffmpeg instances 1080p x265 medium (${DURATION}s)..."
+        FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+        PIDS=()
+        for i in $(seq 0 $((INSTANCES - 1))); do
+            NODE=$(assign_numa_node "$i")
+            numactl --cpunodebind=${NODE} --membind=${NODE} \
+                ffmpeg -f rawvideo -video_size 1920x1080 -pix_fmt yuv420p \
+                    ${FPS_ARGS} \
+                    -stream_loop -1 -i "$INPUT_1080P" \
+                    -t "$DURATION" \
+                    -c:v libx265 -preset medium \
+                    -x265-params "pools=none" \
+                    -threads 1 \
+                    -f null - \
+                    >> "${NDIR}/instance_${i}.log" 2>&1 &
+            PIDS+=($!)
+        done
+        log "[N] All instances launched. Waiting..."
+        START_N=$(date +%s)
+        bash ${PROJ}/04_collect_metrics.sh \
+            --output "${NDIR}/bandwidth.csv" \
+            --interval 5 \
+            --pids "${PIDS[*]}" &
+        MONITOR_PID=$!
+
+        wait "${PIDS[@]}" || log "[N] WARNING: One or more instances exited with error (possible OOM)"
+        END_N=$(date +%s)
+        kill "$MONITOR_PID" 2>/dev/null || true
+        wait "$MONITOR_PID" 2>/dev/null || true
+        ELAPSED_N=$((END_N - START_N))
+        log "[N] All instances completed in ${ELAPSED_N}s"
+        summarize_metrics "${NDIR}/bandwidth.csv" "N"
+        : "${METRICS[N_cpu]:=0}"; : "${METRICS[N_iowait]:=0}"
+        : "${METRICS[N_mem]:=0}"; : "${METRICS[N_bw]:=0}"
+
+        TOTAL_FPS_N=0
+        FPS_LIST_N=()
+        for i in $(seq 0 $((INSTANCES - 1))); do
+            FPS_I=$(parse_fps "${NDIR}/instance_${i}.log")
+            FPS_LIST_N+=("${FPS_I:-0}")
+            TOTAL_FPS_N=$(echo "$TOTAL_FPS_N + ${FPS_I:-0}" | bc)
+        done
+        AVG_FPS_N=$(echo "scale=2; $TOTAL_FPS_N / $INSTANCES" | bc)
+        log "[N] Total FPS: ${TOTAL_FPS_N}, Avg per instance: ${AVG_FPS_N}"
+
+        FPS_JSON_N=$(printf '%s\n' "${FPS_LIST_N[@]}" | jq -R . | jq -s .)
+        cat > "${NDIR}/result.json" <<EOF
+{
+  "group": "N",
+  "scenario": {
+    "name": "分辨率对比（1080p x265 medium ${INSTANCES}×1t）",
+    "characteristics": ["1080p分辨率", "x265 medium预设", "pools=none", "${INSTANCES}路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "medium 计算量 CPU ~98%，1080p 帧率约4x于 4K"},
+    "memory_pressure": {"level": "低", "desc": "1080p working set ~5MB/实例，全部驻留 L3，几乎不访问 DRAM"},
+    "expected": "对比 B组(4K medium)：FPS 约 4x，内存带宽反而下降，验证缓存命中提升"
+  },
+  "params": {
+    "resolution": "1920x1080",
+    "codec": "libx265",
+    "preset": "medium",
+    "x265_params": "pools=none",
+    "encode_method": "libx265",
+    "threads_per_instance": 1,
+    "instances": ${INSTANCES}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INSTANCES},
+  "duration_s": ${ELAPSED_N},
+  "avg_fps_per_instance": ${AVG_FPS_N},
+  "total_fps": ${TOTAL_FPS_N},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[N_cpu]},
+  "iowait_pct": ${METRICS[N_iowait]},
+  "mem_used_gb": ${METRICS[N_mem]},
+  "membw_read_gbs": ${METRICS[N_bw]},
+  "fps_per_instance": ${FPS_JSON_N}
+}
+EOF
+        log "[N] Done. Result: ${NDIR}/result.json"
+    fi
+fi
+
+# ────────────────────────────────────────────────────────────────
+# 测试组 O：INSTANCES 并行实例，1080p SVT-AV1 p10（AV1 分辨率对比）
+#
+# 目标：AV1 在 1080p 的吞吐量，与 Group N x265 对比
+# 预期：CPU ~95%，总 FPS ~7000+
+# ────────────────────────────────────────────────────────────────
+if should_run O && ! should_skip O; then
+    if [ "${INSTANCES}" -le 0 ]; then
+        log "[O] INSTANCES=0, skipping."
+    else
+        SVT_PRESET_O="${SVT_PRESET_O:-10}"
+        log_banner "O" "AV1 分辨率对比（1080p SVT-AV1 p${SVT_PRESET_O} ${INSTANCES}×1t）" \
+            "验证 AV1 在 1080p 的吞吐量，与 N 组 x265 对比" \
+            "1080p | SVT-AV1 preset=${SVT_PRESET_O} | lp=1 | ${INSTANCES}路并发 | numactl绑定" \
+            "极高" "1080p AV1 CPU ~95%，帧率远高于 4K" \
+            "低" "1080p working set 更小，DRAM 带宽压力低" \
+            "对比 N组(x265 medium 1080p)：AV1 FPS 约 2-3x，压缩率高 20-30%"
+        log "============================================"
+        log " Group O: ${INSTANCES} parallel 1080p SVT-AV1 preset=${SVT_PRESET_O}"
+        log "============================================"
+        ODIR="${OUTPUT_DIR}/groupO_1080p_svtav1_p${SVT_PRESET_O}_${INSTANCES}x1t"
+        mkdir -p "$ODIR"
+
+        # 独立生成或验证 1080p 输入文件（O 组可能单独运行，不依赖 N 组）
+        INPUT_1080P="/dev/shm/input_1080p.yuv"
+        EXPECTED_1080P_SIZE=$(( 1920 * 1080 * 3 / 2 * 10 * 30 ))
+        ACTUAL_SIZE=$(stat -c%s "$INPUT_1080P" 2>/dev/null || echo 0)
+        if [ "$ACTUAL_SIZE" -lt "$(( EXPECTED_1080P_SIZE * 9 / 10 ))" ]; then
+            log "[O] Generating 1080p input (~$(( EXPECTED_1080P_SIZE / 1024 / 1024 ))MB)..."
+            ffmpeg -f lavfi -i color=gray:s=1920x1080:r=30 \
+                -t 10 -f rawvideo -pix_fmt yuv420p -y "$INPUT_1080P" 2>/dev/null
+            log "[O] 1080p input ready: $(stat -c%s $INPUT_1080P) bytes"
+        else
+            log "[O] 1080p input exists: ${ACTUAL_SIZE} bytes"
+        fi
+
+        if ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+            SVT_MODE_O="libsvtav1"
+        elif command -v SvtAv1EncApp &>/dev/null; then
+            SVT_MODE_O="pipe"
+        else
+            log "[O] ERROR: Neither ffmpeg libsvtav1 nor SvtAv1EncApp found. Skipping Group O."
+            SVT_MODE_O="none"
+        fi
+
+        if [ "$SVT_MODE_O" != "none" ]; then
+            log "[O] SVT encoder mode: ${SVT_MODE_O}"
+            log "[O] Launching ${INSTANCES} instances 1080p (${DURATION}s, preset=${SVT_PRESET_O})..."
+            FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
+            PIDS=()
+            for i in $(seq 0 $((INSTANCES - 1))); do
+                NODE=$(assign_numa_node "$i")
+                if [ "$SVT_MODE_O" = "libsvtav1" ]; then
+                    numactl --cpunodebind=${NODE} --membind=${NODE} \
+                        ffmpeg -f rawvideo -video_size 1920x1080 -pix_fmt yuv420p \
+                            ${FPS_ARGS} \
+                            -stream_loop -1 -i "${INPUT_1080P}" \
+                            -t "${DURATION}" \
+                            -c:v libsvtav1 -preset ${SVT_PRESET_O} \
+                            -svtav1-params "lp=1" \
+                            -f null - \
+                            >> "${ODIR}/instance_${i}.log" 2>&1 &
+                else
+                    numactl --cpunodebind=${NODE} --membind=${NODE} \
+                        bash -c "ffmpeg -f rawvideo -video_size 1920x1080 -pix_fmt yuv420p \
+                            ${FPS_ARGS} -stream_loop -1 -i \"${INPUT_1080P}\" \
+                            -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
+                        SvtAv1EncApp -i stdin -w 1920 -h 1080 \
+                            --fps-num 30 --fps-denom 1 \
+                            --preset ${SVT_PRESET_O} --lp 1 \
+                            -n $((DURATION * 30)) -b /dev/null 2>&1" \
+                            >> "${ODIR}/instance_${i}.log" 2>&1 &
+                fi
+                PIDS+=($!)
+            done
+            log "[O] All instances launched. PIDs: ${PIDS[*]}"
+            log "[O] Waiting for completion..."
+
+            START_O=$(date +%s)
+            bash ${PROJ}/04_collect_metrics.sh \
+                --output "${ODIR}/bandwidth.csv" \
+                --interval 5 \
+                --pids "${PIDS[*]}" &
+            MONITOR_PID=$!
+
+            wait "${PIDS[@]}" || log "[O] WARNING: One or more instances exited with error (possible OOM)"
+            END_O=$(date +%s)
+            kill "$MONITOR_PID" 2>/dev/null || true
+            wait "$MONITOR_PID" 2>/dev/null || true
+            ELAPSED_O=$((END_O - START_O))
+            log "[O] All instances completed in ${ELAPSED_O}s"
+            summarize_metrics "${ODIR}/bandwidth.csv" "O"
+            : "${METRICS[O_cpu]:=0}"; : "${METRICS[O_iowait]:=0}"
+            : "${METRICS[O_mem]:=0}"; : "${METRICS[O_bw]:=0}"
+
+            TOTAL_FPS_O=0
+            FPS_LIST_O=()
+            for i in $(seq 0 $((INSTANCES - 1))); do
+                if [ "$SVT_MODE_O" = "libsvtav1" ]; then
+                    FPS_I=$(parse_fps "${ODIR}/instance_${i}.log")
+                else
+                    FPS_I=$(grep -oP 'Average Speed:\s+\K[0-9.]+' "${ODIR}/instance_${i}.log" 2>/dev/null | tail -1)
+                fi
+                FPS_LIST_O+=("${FPS_I:-0}")
+                TOTAL_FPS_O=$(echo "$TOTAL_FPS_O + ${FPS_I:-0}" | bc)
+            done
+            AVG_FPS_O=$(echo "scale=2; $TOTAL_FPS_O / $INSTANCES" | bc)
+            log "[O] Total FPS: ${TOTAL_FPS_O}, Avg per instance: ${AVG_FPS_O}"
+
+            FPS_JSON_O=$(printf '%s\n' "${FPS_LIST_O[@]}" | jq -R . | jq -s .)
+            cat > "${ODIR}/result.json" <<EOF
+{
+  "group": "O",
+  "scenario": {
+    "name": "AV1 分辨率对比（1080p SVT-AV1 p${SVT_PRESET_O} ${INSTANCES}×1t）",
+    "characteristics": ["1080p分辨率", "SVT-AV1 preset=${SVT_PRESET_O}", "lp=1", "${INSTANCES}路并发"],
+    "cpu_pressure": {"level": "极高", "desc": "1080p AV1 CPU ~95%，帧率远高于 4K"},
+    "memory_pressure": {"level": "低", "desc": "1080p working set 更小，DRAM 带宽压力低"},
+    "expected": "对比 N组(x265 medium 1080p)：AV1 FPS 约 2-3x，压缩率高 20-30%"
+  },
+  "params": {
+    "resolution": "1920x1080",
+    "codec": "libsvtav1",
+    "preset": ${SVT_PRESET_O},
+    "lp": 1,
+    "encode_method": "${SVT_MODE_O}",
+    "threads_per_instance": 1,
+    "instances": ${INSTANCES}
+  },
+  "channels": ${CHANNELS},
+  "instances": ${INSTANCES},
+  "duration_s": ${ELAPSED_O},
+  "avg_fps_per_instance": ${AVG_FPS_O},
+  "total_fps": ${TOTAL_FPS_O},
+  "target_fps": ${TARGET_FPS},
+  "avg_cpu_pct": ${METRICS[O_cpu]},
+  "iowait_pct": ${METRICS[O_iowait]},
+  "mem_used_gb": ${METRICS[O_mem]},
+  "membw_read_gbs": ${METRICS[O_bw]},
+  "fps_per_instance": ${FPS_JSON_O}
+}
+EOF
+            log "[O] Done. Result: ${ODIR}/result.json"
+        fi
+    fi
+fi
 
 # ── 汇总 ────────────────────────────────────────
 log "============================================"
