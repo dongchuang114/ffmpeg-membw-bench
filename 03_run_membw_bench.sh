@@ -1047,27 +1047,49 @@ if should_run I && ! should_skip I; then
     IDIR="${OUTPUT_DIR}/groupI_parallel_svtav1_p${SVT_PRESET}"
     mkdir -p "$IDIR"
 
-    if ! command -v SvtAv1EncApp &>/dev/null; then
-        log "[I] ERROR: SvtAv1EncApp not found. Install with: apt-get install svt-av1"
-        log "[I] Skipping Group I."
+    # 自动检测编码路径：优先 ffmpeg libsvtav1（输出兼容 parse_fps），
+    # 否则 fallback 到 ffmpeg pipe → SvtAv1EncApp（需要已安装 svt-av1 包）
+    if ffmpeg -encoders 2>/dev/null | grep -q libsvtav1; then
+        SVT_MODE="libsvtav1"
+    elif command -v SvtAv1EncApp &>/dev/null; then
+        SVT_MODE="pipe"
     else
-        log "[I] Launching ${INSTANCES} ffmpeg|SvtAv1EncApp instances (${DURATION}s)..."
+        log "[I] ERROR: Neither ffmpeg libsvtav1 nor SvtAv1EncApp found."
+        log "[I]   Option A: Use a ffmpeg built with --enable-libsvtav1"
+        log "[I]   Option B: apt-get install svt-av1"
+        log "[I] Skipping Group I."
+        SVT_MODE="none"
+    fi
+
+    if [ "$SVT_MODE" != "none" ]; then
+        log "[I] SVT encoder mode: ${SVT_MODE}"
+        log "[I] Launching ${INSTANCES} instances (${DURATION}s, preset=${SVT_PRESET})..."
         FPS_ARGS=$(build_fps_args "$TARGET_FPS" 30 "encode")
         PIDS=()
         for i in $(seq 0 $((INSTANCES - 1))); do
             NODE=$(assign_numa_node "$i")
-            numactl --cpunodebind=${NODE} --membind=${NODE} \
-                bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
-                    ${FPS_ARGS} \
-                    -stream_loop -1 -i \"${INPUT}\" \
-                    -t \"${DURATION}\" \
-                    -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
-                SvtAv1EncApp -i stdin -w 3840 -h 2160 \
-                    --fps-num 30 --fps-denom 1 \
-                    --preset ${SVT_PRESET} --lp 1 \
-                    -n $((DURATION * 30)) \
-                    -b /dev/null 2>&1" \
-                    >> "${IDIR}/instance_${i}.log" 2>&1 &
+            if [ "$SVT_MODE" = "libsvtav1" ]; then
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} \
+                        -stream_loop -1 -i "${INPUT}" \
+                        -t "${DURATION}" \
+                        -c:v libsvtav1 -preset ${SVT_PRESET} \
+                        -svtav1-params "lp=1" \
+                        -f null - \
+                        >> "${IDIR}/instance_${i}.log" 2>&1 &
+            else
+                # pipe 模式：ffmpeg raw → SvtAv1EncApp stdin
+                numactl --cpunodebind=${NODE} --membind=${NODE} \
+                    bash -c "ffmpeg -f rawvideo -video_size 3840x2160 -pix_fmt yuv420p \
+                        ${FPS_ARGS} -stream_loop -1 -i \"${INPUT}\" \
+                        -t \"${DURATION}\" -f rawvideo -pix_fmt yuv420p - 2>/dev/null | \
+                    SvtAv1EncApp -i stdin -w 3840 -h 2160 \
+                        --fps-num 30 --fps-denom 1 \
+                        --preset ${SVT_PRESET} --lp 1 \
+                        -n $((DURATION * 30)) -b /dev/null 2>&1" \
+                        >> "${IDIR}/instance_${i}.log" 2>&1 &
+            fi
             PIDS+=($!)
         done
         log "[I] All instances launched. PIDs: ${PIDS[*]}"
@@ -1088,15 +1110,15 @@ if should_run I && ! should_skip I; then
         log "[I] All instances completed in ${ELAPSED_I}s"
         summarize_metrics "${IDIR}/bandwidth.csv" "I"
 
-        # SVT-AV1 输出格式：'Average Speed:   19.458 fps'（不同于 ffmpeg 的 (N fps)）
-        parse_svt_fps() {
-            grep -oP 'Average Speed:\s+\K[0-9.]+' "$1" 2>/dev/null | tail -1
-        }
-
         TOTAL_FPS_I=0
         FPS_LIST_I=()
         for i in $(seq 0 $((INSTANCES - 1))); do
-            FPS_I=$(parse_svt_fps "${IDIR}/instance_${i}.log")
+            if [ "$SVT_MODE" = "libsvtav1" ]; then
+                FPS_I=$(parse_fps "${IDIR}/instance_${i}.log")
+            else
+                # SvtAv1EncApp 输出格式：'Average Speed:   19.458 fps'
+                FPS_I=$(grep -oP 'Average Speed:\s+\K[0-9.]+' "${IDIR}/instance_${i}.log" 2>/dev/null | tail -1)
+            fi
             FPS_LIST_I+=("${FPS_I:-0}")
             TOTAL_FPS_I=$(echo "$TOTAL_FPS_I + ${FPS_I:-0}" | bc)
         done
