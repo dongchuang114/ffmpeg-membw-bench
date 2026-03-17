@@ -1141,7 +1141,7 @@ if should_run I && ! should_skip I; then
     "codec": "libsvtav1",
     "preset": ${SVT_PRESET},
     "lp": 1,
-    "pipe_method": "ffmpeg_stdout_to_SvtAv1EncApp_stdin",
+    "encode_method": "${SVT_MODE:+ffmpeg_libsvtav1_direct}${SVT_MODE:-ffmpeg_pipe_SvtAv1EncApp}",
     "threads_per_instance": ${THREADS},
     "instances": ${INSTANCES}
   },
