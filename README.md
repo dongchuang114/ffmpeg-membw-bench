@@ -654,7 +654,7 @@ x265 在多线程模式下使用 **WPP（Wavefront Parallel Processing）**：
 
 ```bash
 cd /workspace/chuadong/work/benchmark/ffmpeg-membw-bench
-OUTBASE=/tmp/scaling_$(date +%m%d)
+OUTBASE=$(pwd)/results/scaling_$(date +%m%d)
 
 # 1. x265 medium 32×8t（基准）
 bash 03_run_membw_bench.sh --group B --instances 32 --threads 8 \
@@ -677,21 +677,29 @@ bash 03_run_membw_bench.sh --group H --instances 256 --threads 1 \
     --duration 60 --output-dir ${OUTBASE}/256x1t_ultrafast
 ```
 
-跑完后汇总结果：
+跑完后生成 HTML 报告：
+
+```bash
+python3 06_generate_scaling_report.py \\
+    --results-dir ${OUTBASE} \\
+    --output ${OUTBASE}/scaling_report.html
+```
+
+汇总查看原始数据：
 
 ```bash
 for cfg in 32x8t 64x4t 128x2t 256x1t; do
   echo -n "${cfg}  "
   jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
-    ${OUTBASE}/${cfg}/groupB_parallel_x265/result.json 2>/dev/null || echo "NOT FOUND"
+    ${OUTBASE}/${cfg}/groupB_parallel_x265_medium/result.json 2>/dev/null || echo "NOT FOUND"
 done
 echo -n "256x1t_ultrafast  "
 jq -r '[.instances, .avg_fps_per_instance, .total_fps, .avg_cpu_pct, .membw_read_gbs] | @tsv' \
   ${OUTBASE}/256x1t_ultrafast/groupH_parallel_x265_ultrafast/result.json 2>/dev/null || echo "NOT FOUND"
 ```
 
-> **注意**：各组顺序执行，每组约 60-90s，全部完成约 **6-8 分钟**。
-> 256 实例组因进程数多，metrics 采集阶段稍慢，属正常现象。
+> **注意**：各组顺序执行，每组约 60-90s，全部完成约 **6-8 分钟**。  
+> 结果持久保存在 `results/scaling_MMDD/` 目录，服务器重启不丢失。
 
 ---
 
