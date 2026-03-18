@@ -76,6 +76,9 @@ def load_result_json(result_dir):
         'E': ['groupE_parallel_decode'],
         'F': ['groupF_parallel_1080p_ultrafast'],
         'G': ['groupG_parallel_x265_slow_ref8'],
+        'H': ['groupH_parallel_x265_ultrafast'],
+        'I': ['groupI_parallel_svtav1_p10', 'groupI_parallel_svtav1_p8',
+              'groupI_parallel_svtav1_p12'],
     }
     for grp, subs in GROUP_SUBS.items():
         for sub in subs:
@@ -500,6 +503,8 @@ def build_single_report(result_dir, stream_peak=None):
     grp_e = data.get('groupE', {})
     grp_f = data.get('groupF', {})
     grp_g = data.get('groupG', {})
+    grp_h = data.get('groupH', {})
+    grp_i = data.get('groupI', {})
 
     fps_a     = float(grp_a.get('total_fps', 0))
     fps_b     = float(grp_b.get('total_fps', 0))
@@ -520,6 +525,9 @@ def build_single_report(result_dir, stream_peak=None):
         ('E', grp_e, str(instances) + 'x parallel decode'),
         ('F', grp_f, str(instances) + 'x parallel 1080p x265 ultrafast'),
         ('G', grp_g, str(instances) + 'x parallel 4K x265 slow ref=8'),
+        ('H', grp_h, str(grp_h.get('instances', instances)) + 'x parallel 4K x265 ultrafast'),
+        ('I', grp_i, 'SVT-AV1 p' + str(grp_i.get('params', {}).get('preset', '10'))
+         + ' ' + str(grp_i.get('instances', instances)) + 'x parallel'),
     ]:
         if g:
             avg_cpu   = round(safe_float(g.get('avg_cpu_pct',    0)), 1)
@@ -549,6 +557,8 @@ def build_single_report(result_dir, stream_peak=None):
     card_e = _scenario_card('E', grp_e)
     card_f = _scenario_card('F', grp_f)
     card_g = _scenario_card('G', grp_g)
+    card_h = _scenario_card('H', grp_h) if grp_h else ''
+    card_i = _scenario_card('I', grp_i) if grp_i else ''
 
     # Compute DRAM estimates (avoid backslash in f-string by precomputing)
     dram_per_inst = round(fps_b_avg * 11.86 * 2 / 1024, 1)
@@ -608,7 +618,7 @@ def build_single_report(result_dir, stream_peak=None):
         '\n'
         '<section id="details" class="section">\n'
         '<h2>Group Details</h2>\n'
-        + card_a + card_b + card_c + card_d + card_e + card_f + card_g +
+        + card_a + card_b + card_c + card_d + card_e + card_f + card_g + card_h + card_i +
         '</section>\n'
         '\n'
         '<section id="sysinfo" class="section">\n'
